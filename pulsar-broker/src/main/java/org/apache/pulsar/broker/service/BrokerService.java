@@ -648,6 +648,14 @@ public class BrokerService implements Closeable, ZooKeeperCacheListener<Policies
                     // Exceptional topics should be recreated.
                     topics.remove(topic, topicFuture);
                 } else {
+                    if (!pulsar.getNamespaceService().isServiceUnitActive(TopicName.get(topic))) {
+                        // namespace is being unloaded
+                        String msg = String.format("Namespace is being unloaded, cannot add topic %s", topic);
+                        log.warn(msg);
+                        topics.remove(topic, topicFuture);
+                        topicFuture.completeExceptionally(new ServiceUnitNotReadyException(msg));
+                    }
+
                     return topicFuture;
                 }
             }
