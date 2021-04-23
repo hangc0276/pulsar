@@ -88,7 +88,7 @@ public class BacklogQuotaManager {
                     .map(map -> map.get(BacklogQuotaType.destination_storage.name()))
                     .orElseGet(() -> getBacklogQuota(topicName.getNamespace(), policyPath));
         } catch (Exception e) {
-            log.warn("Failed to read topic policies data, will apply the namespace backlog quota: topicName={}",
+            log.debug("Failed to read topic policies data, will apply the namespace backlog quota: topicName={}",
                     topicName, e);
         }
         return getBacklogQuota(topicName.getNamespace(), policyPath);
