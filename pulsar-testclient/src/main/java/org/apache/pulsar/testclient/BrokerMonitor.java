@@ -28,7 +28,7 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 import com.beust.jcommander.ParameterException;
-import org.apache.pulsar.broker.TimeAverageBrokerData;
+import org.apache.pulsar.policies.data.loadbalancer.TimeAverageBrokerData;
 import org.apache.pulsar.broker.loadbalance.impl.ModularLoadManagerImpl;
 import org.apache.pulsar.policies.data.loadbalancer.LoadReport;
 import org.apache.pulsar.policies.data.loadbalancer.LocalBrokerData;
@@ -48,6 +48,12 @@ import com.google.gson.Gson;
 /**
  * Monitors brokers and prints to the console information about their system resource usages, their topic and bundle
  * counts, their message rates, and other metrics.
+ */
+
+/**
+ * TODO BrokerMonitor is a seperate process to monitor the running state of each broker.
+ * It read zk load stat and display. We don't deal with it this time.
+ * In the follow step, we may start a reader thread and read the load balance stat real-time and display it.
  */
 public class BrokerMonitor {
     private static final Logger log = LoggerFactory.getLogger(BrokerMonitor.class);

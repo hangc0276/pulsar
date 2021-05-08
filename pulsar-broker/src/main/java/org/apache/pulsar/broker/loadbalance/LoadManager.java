@@ -94,6 +94,11 @@ public interface LoadManager {
     void writeResourceQuotasToZooKeeper() throws Exception;
 
     /**
+     * Read Load stats from System topic.
+     */
+    void readStatsFromSystemTopic() throws Exception;
+
+    /**
      * Generate load balancing stats metrics.
      */
     List<Metrics> getLoadBalancingMetrics();

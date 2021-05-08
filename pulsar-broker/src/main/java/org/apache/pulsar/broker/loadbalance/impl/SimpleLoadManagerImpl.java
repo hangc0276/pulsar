@@ -1302,6 +1302,10 @@ public class SimpleLoadManagerImpl implements LoadManager, ZooKeeperCacheListene
         }
     }
 
+    @Override
+    public void readStatsFromSystemTopic() throws Exception {
+        // TODO
+    }
     /**
      * Check if last generated load-report time passed the minimum time for load-report update.
      *

@@ -240,13 +240,13 @@ public class SystemTopicBasedTopicPoliciesService implements TopicPoliciesServic
         reader.hasMoreEventsAsync().whenComplete((hasMore, ex) -> {
             if (ex != null) {
                 future.completeExceptionally(ex);
-                readerCaches.remove(reader.getSystemTopic().getTopicName().getNamespaceObject());
+                readerCaches.remove(reader.getSystemTopicClient().getTopicName().getNamespaceObject());
             }
             if (hasMore) {
                 reader.readNextAsync().whenComplete((msg, e) -> {
                     if (e != null) {
                         future.completeExceptionally(e);
-                        readerCaches.remove(reader.getSystemTopic().getTopicName().getNamespaceObject());
+                        readerCaches.remove(reader.getSystemTopicClient().getTopicName().getNamespaceObject());
                     }
                     refreshTopicPoliciesCache(msg);
                     initPolicesCache(reader, future);
@@ -254,7 +254,7 @@ public class SystemTopicBasedTopicPoliciesService implements TopicPoliciesServic
             } else {
                 future.complete(null);
                 policyCacheInitMap.computeIfPresent(
-                        reader.getSystemTopic().getTopicName().getNamespaceObject(), (k, v) -> true);
+                        reader.getSystemTopicClient().getTopicName().getNamespaceObject(), (k, v) -> true);
             }
         });
     }
@@ -268,7 +268,7 @@ public class SystemTopicBasedTopicPoliciesService implements TopicPoliciesServic
             } else {
                 if (ex instanceof PulsarClientException.AlreadyClosedException) {
                     log.error("Read more topic policies exception, close the read now!", ex);
-                    NamespaceName namespace = reader.getSystemTopic().getTopicName().getNamespaceObject();
+                    NamespaceName namespace = reader.getSystemTopicClient().getTopicName().getNamespaceObject();
                     ownedBundlesCountPerNamespace.remove(namespace);
                     readerCaches.remove(namespace);
                 } else {

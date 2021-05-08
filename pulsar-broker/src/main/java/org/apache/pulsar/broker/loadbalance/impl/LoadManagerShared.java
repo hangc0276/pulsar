@@ -38,7 +38,6 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 import org.apache.commons.lang3.StringUtils;
-import org.apache.pulsar.broker.BrokerData;
 import org.apache.pulsar.broker.PulsarService;
 import org.apache.pulsar.broker.loadbalance.BrokerHostUsage;
 import org.apache.pulsar.broker.loadbalance.LoadData;
@@ -49,6 +48,7 @@ import org.apache.pulsar.common.policies.data.LocalPolicies;
 import org.apache.pulsar.common.util.FutureUtil;
 import org.apache.pulsar.common.util.collections.ConcurrentOpenHashMap;
 import org.apache.pulsar.common.util.collections.ConcurrentOpenHashSet;
+import org.apache.pulsar.policies.data.loadbalancer.BrokerData;
 import org.apache.pulsar.policies.data.loadbalancer.SystemResourceUsage;
 import org.apache.pulsar.zookeeper.ZooKeeperDataCache;
 import org.slf4j.Logger;
@@ -106,8 +106,10 @@ public class LoadManagerShared {
         if (isIsolationPoliciesPresent) {
             LOG.debug("Isolation Policies Present for namespace - [{}]", namespace.toString());
         }
+        LOG.info("[hangc-a] ns: {}, isIso: {}, isNon: {}", namespace, isIsolationPoliciesPresent, isNonPersistentTopic);
         for (final String broker : availableBrokers) {
             final String brokerUrlString = String.format("http://%s", broker);
+            LOG.info("[hangc-a] broker: {}", brokerUrlString);
             URL brokerUrl;
             try {
                 brokerUrl = new URL(brokerUrlString);
@@ -117,6 +119,7 @@ public class LoadManagerShared {
             }
             // todo: in future check if the resource unit has resources to take the namespace
             if (isIsolationPoliciesPresent) {
+                LOG.info("[hangc-a] bbb: {}", brokerTopicLoadingPredicate.isEnablePersistentTopics(brokerUrlString));
                 // note: serviceUnitID is namespace name and ResourceID is brokerName
                 if (policies.isPrimaryBroker(namespace, brokerUrl.getHost())) {
                     primariesCache.add(broker);
@@ -140,9 +143,11 @@ public class LoadManagerShared {
 
                 }
             } else {
+                LOG.info("[hangc-a] ccc");
                 // non-persistent topic can be assigned to only those brokers that enabled for non-persistent topic
                 if (isNonPersistentTopic
                         && !brokerTopicLoadingPredicate.isEnableNonPersistentTopics(brokerUrlString)) {
+                    LOG.info("[hangc-a] ddd");
                     if (LOG.isDebugEnabled()) {
                         LOG.debug("Filter broker- [{}] because it doesn't support non-persistent namespace - [{}]",
                                 brokerUrl.getHost(), namespace.toString());
@@ -150,16 +155,20 @@ public class LoadManagerShared {
                 } else if (!isNonPersistentTopic
                         && !brokerTopicLoadingPredicate.isEnablePersistentTopics(brokerUrlString)) {
                     // persistent topic can be assigned to only brokers that enabled for persistent-topic
+                    LOG.info("[hangc-a] eee");
                     if (LOG.isDebugEnabled()) {
                         LOG.debug("Filter broker- [{}] because broker only supports non-persistent namespace - [{}]",
                                 brokerUrl.getHost(), namespace.toString());
                     }
                 } else if (policies.isSharedBroker(brokerUrl.getHost())) {
+                    LOG.info("[hangc-a] fff");
                     secondaryCache.add(broker);
                     if (LOG.isDebugEnabled()) {
                         LOG.debug("Added Shared Broker - [{}] as possible Candidates for namespace - [{}]",
                                 brokerUrl.getHost(), namespace.toString());
                     }
+                } else {
+                    LOG.info("[hangc-a] ggg");
                 }
             }
         }

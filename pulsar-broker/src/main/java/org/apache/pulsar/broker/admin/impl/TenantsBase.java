@@ -347,6 +347,7 @@ public class TenantsBase extends PulsarWebResource {
         try {
             Set<String> availableClusters = clusterResources().list();
             Set<String> allowedClusters = info.getAllowedClusters();
+            log.info("[hangc] avaiableClusters: {}, allowedClusters: {}", availableClusters, allowedClusters);
             nonexistentClusters = allowedClusters.stream().filter(
                     cluster -> !(availableClusters.contains(cluster) || Constants.GLOBAL_CLUSTER.equals(cluster)))
                     .collect(Collectors.toList());

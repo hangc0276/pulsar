@@ -2463,6 +2463,11 @@ public class BrokerService implements Closeable, ZooKeeperCacheListener<Policies
                 && pulsar.getConfiguration().isSystemTopicEnabled()) {
             return true;
         }
+        if (EventsTopicNames.LOAD_BALANCE_STATS_NAME.equals(topicName.getLocalName())
+                && pulsar.getConfiguration().isSystemTopicEnabled()) {
+            return true;
+        }
+
         AutoTopicCreationOverride autoTopicCreationOverride = getAutoTopicCreationOverride(topicName);
         if (autoTopicCreationOverride != null) {
             return autoTopicCreationOverride.allowAutoTopicCreation;

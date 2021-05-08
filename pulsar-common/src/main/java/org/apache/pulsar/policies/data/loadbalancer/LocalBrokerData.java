@@ -20,6 +20,10 @@ package org.apache.pulsar.policies.data.loadbalancer;
 
 import com.fasterxml.jackson.databind.annotation.JsonDeserialize;
 import com.google.common.collect.Maps;
+import lombok.Data;
+import lombok.Getter;
+import lombok.Setter;
+
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -33,6 +37,10 @@ import java.util.Set;
  * Contains all the data that is maintained locally on each broker.
  */
 @JsonDeserialize(as = LocalBrokerData.class)
+//@AllArgsConstructor
+@Data
+@Getter
+@Setter
 public class LocalBrokerData extends JSONWritable implements LoadManagerReport {
 
     // URLs to satisfy contract of ServiceLookupData (used by NamespaceService).
@@ -69,13 +77,13 @@ public class LocalBrokerData extends JSONWritable implements LoadManagerReport {
     private int numProducers;
 
     // All bundles belonging to this broker.
-    private Set<String> bundles;
+    private HashSet<String> bundles;
 
     // The bundles gained since the last invocation of update.
-    private Set<String> lastBundleGains;
+    private HashSet<String> lastBundleGains;
 
     // The bundles lost since the last invocation of update.
-    private Set<String> lastBundleLosses;
+    private HashSet<String> lastBundleLosses;
 
     // The version string that this broker is running, obtained from the Maven build artifact in the POM
     private String brokerVersionString;
@@ -309,7 +317,7 @@ public class LocalBrokerData extends JSONWritable implements LoadManagerReport {
         return lastBundleGains;
     }
 
-    public void setLastBundleGains(Set<String> lastBundleGains) {
+    public void setLastBundleGains(HashSet<String> lastBundleGains) {
         this.lastBundleGains = lastBundleGains;
     }
 
@@ -317,7 +325,7 @@ public class LocalBrokerData extends JSONWritable implements LoadManagerReport {
         return lastBundleLosses;
     }
 
-    public void setLastBundleLosses(Set<String> lastBundleLosses) {
+    public void setLastBundleLosses(HashSet<String> lastBundleLosses) {
         this.lastBundleLosses = lastBundleLosses;
     }
 
@@ -334,7 +342,7 @@ public class LocalBrokerData extends JSONWritable implements LoadManagerReport {
         return bundles;
     }
 
-    public void setBundles(Set<String> bundles) {
+    public void setBundles(HashSet<String> bundles) {
         this.bundles = bundles;
     }
 

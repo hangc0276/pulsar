@@ -125,6 +125,11 @@ public class ModularLoadManagerWrapper implements LoadManager {
     }
 
     @Override
+    public void readStatsFromSystemTopic() {
+        loadManager.readStatsFromSystemTopic();
+    }
+
+    @Override
     public Deserializer<? extends ServiceLookupData> getLoadReportDeserializer() {
         return loadManager.getLoadReportDeserializer();
     }

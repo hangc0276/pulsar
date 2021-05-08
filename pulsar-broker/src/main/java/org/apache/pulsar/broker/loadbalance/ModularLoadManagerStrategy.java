@@ -20,9 +20,9 @@ package org.apache.pulsar.broker.loadbalance;
 
 import java.util.Optional;
 import java.util.Set;
-import org.apache.pulsar.broker.BundleData;
 import org.apache.pulsar.broker.ServiceConfiguration;
 import org.apache.pulsar.broker.loadbalance.impl.LeastLongTermMessageRate;
+import org.apache.pulsar.policies.data.loadbalancer.BundleData;
 
 /**
  * Interface which serves as a component for ModularLoadManagerImpl, flexibly allowing the injection of potentially
@@ -44,7 +44,7 @@ public interface ModularLoadManagerStrategy {
      * @return The name of the selected broker as it appears on ZooKeeper.
      */
     Optional<String> selectBroker(Set<String> candidates, BundleData bundleToAssign, LoadData loadData,
-            ServiceConfiguration conf);
+                                  ServiceConfiguration conf);
 
     /**
      * Create a placement strategy using the configuration.

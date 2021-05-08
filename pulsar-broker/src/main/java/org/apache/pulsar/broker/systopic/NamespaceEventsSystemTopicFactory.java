@@ -50,6 +50,24 @@ public class NamespaceEventsSystemTopicFactory {
         return new TransactionBufferSystemTopicClient(client, topicName, transactionBufferSnapshotService);
     }
 
+    public LoadBalanceStatsSystemTopicClient createLoadBalanceStatsSystemTopicClient(NamespaceName namespaceName) {
+        TopicName topicName = TopicName.get("persistent", namespaceName,
+                EventsTopicNames.LOAD_BALANCE_STATS_NAME);
+        log.info("Create load balance stats system topic client, topicName: {}", topicName);
+        return new LoadBalanceStatsSystemTopicClient(client, topicName);
+    }
+
+    public SystemTopicClient createSystemTopicClient(NamespaceName namespaceName, EventType eventType) {
+        switch (eventType) {
+            case LOAD_BALANCE_STATS:
+                TopicName topicName = TopicName.get("non-persistent", namespaceName,
+                    EventsTopicNames.LOAD_BALANCE_STATS_NAME);
+                return new LoadBalanceStatsSystemTopicClient(client, topicName);
+            default:
+                return null;
+        }
+    }
+
     public static TopicName getSystemTopicName(NamespaceName namespaceName, EventType eventType) {
         switch (eventType) {
             case TOPIC_POLICY:
@@ -57,6 +75,9 @@ public class NamespaceEventsSystemTopicFactory {
                         EventsTopicNames.NAMESPACE_EVENTS_LOCAL_NAME);
             case TRANSACTION_BUFFER_SNAPSHOT:
                 return TopicName.get("persistent", namespaceName, EventsTopicNames.TRANSACTION_BUFFER_SNAPSHOT);
+
+            case LOAD_BALANCE_STATS:
+                return TopicName.get("non-persistent", namespaceName, EventsTopicNames.LOAD_BALANCE_STATS_NAME);
             default:
                 return null;
         }

@@ -129,6 +129,11 @@ public class NoopLoadManager implements LoadManager {
     }
 
     @Override
+    public void readStatsFromSystemTopic() throws Exception {
+        // do nothing
+    }
+
+    @Override
     public List<Metrics> getLoadBalancingMetrics() {
         return Collections.emptyList();
     }

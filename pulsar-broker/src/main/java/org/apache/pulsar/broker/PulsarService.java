@@ -25,6 +25,7 @@ import static org.apache.pulsar.broker.cache.ConfigurationCacheService.POLICIES;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
+import com.google.common.collect.Sets;
 import io.netty.channel.ChannelInitializer;
 import io.netty.channel.socket.SocketChannel;
 import io.netty.util.HashedWheelTimer;
@@ -44,6 +45,7 @@ import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
@@ -55,6 +57,7 @@ import java.util.function.Supplier;
 import lombok.AccessLevel;
 import lombok.Getter;
 import lombok.Setter;
+import lombok.extern.slf4j.Slf4j;
 import org.apache.bookkeeper.client.BookKeeper;
 import org.apache.bookkeeper.common.util.OrderedExecutor;
 import org.apache.bookkeeper.common.util.OrderedScheduler;
@@ -82,12 +85,15 @@ import org.apache.pulsar.broker.loadbalance.LoadManager;
 import org.apache.pulsar.broker.loadbalance.LoadReportUpdaterTask;
 import org.apache.pulsar.broker.loadbalance.LoadResourceQuotaUpdaterTask;
 import org.apache.pulsar.broker.loadbalance.LoadSheddingTask;
+import org.apache.pulsar.broker.loadbalance.LoadStatsUpdaterTask;
 import org.apache.pulsar.broker.loadbalance.impl.LoadManagerShared;
 import org.apache.pulsar.broker.namespace.NamespaceService;
 import org.apache.pulsar.broker.protocol.ProtocolHandlers;
 import org.apache.pulsar.broker.resources.PulsarResources;
 import org.apache.pulsar.broker.service.BrokerService;
 import org.apache.pulsar.broker.service.SystemTopicBaseTxnBufferSnapshotService;
+import org.apache.pulsar.broker.service.SystemTopicBasedService;
+import org.apache.pulsar.broker.service.SystemTopicBasedServiceImpl;
 import org.apache.pulsar.broker.service.SystemTopicBasedTopicPoliciesService;
 import org.apache.pulsar.broker.service.Topic;
 import org.apache.pulsar.broker.service.TopicPoliciesService;
@@ -110,11 +116,15 @@ import org.apache.pulsar.client.impl.PulsarClientImpl;
 import org.apache.pulsar.common.conf.InternalConfigurationData;
 import org.apache.pulsar.common.configuration.PulsarConfigurationLoader;
 import org.apache.pulsar.common.configuration.VipStatus;
+import org.apache.pulsar.common.events.EventType;
+import org.apache.pulsar.common.events.EventsTopicNames;
+import org.apache.pulsar.common.events.LoadBalanceStatsEvent;
 import org.apache.pulsar.common.naming.NamespaceBundle;
 import org.apache.pulsar.common.naming.NamespaceName;
 import org.apache.pulsar.common.naming.TopicName;
 import org.apache.pulsar.common.policies.data.ClusterData;
 import org.apache.pulsar.common.policies.data.OffloadPolicies;
+import org.apache.pulsar.common.policies.data.TenantInfo;
 import org.apache.pulsar.common.protocol.schema.SchemaStorage;
 import org.apache.pulsar.common.util.FutureUtil;
 import org.apache.pulsar.compaction.Compactor;
@@ -160,6 +170,7 @@ import org.slf4j.LoggerFactory;
 
 @Getter(AccessLevel.PUBLIC)
 @Setter(AccessLevel.PROTECTED)
+@Slf4j
 public class PulsarService implements AutoCloseable {
     private static final Logger LOG = LoggerFactory.getLogger(PulsarService.class);
     private ServiceConfiguration config = null;
@@ -172,6 +183,8 @@ public class PulsarService implements AutoCloseable {
     private ConfigurationCacheService configurationCacheService = null;
     private LocalZooKeeperCacheService localZkCacheService = null;
     private TopicPoliciesService topicPoliciesService = TopicPoliciesService.DISABLED;
+    private SystemTopicBasedService<LoadBalanceStatsEvent> loadBalanceStatsEventService =
+        SystemTopicBasedService.DISABLED;
     private BookKeeperClientFactory bkClientFactory;
     private ZooKeeperCache localZkCache;
     private GlobalZooKeeperCache globalZkCache;
@@ -183,6 +196,7 @@ public class PulsarService implements AutoCloseable {
 
     private OrderedExecutor orderedExecutor;
     private final ScheduledExecutorService loadManagerExecutor;
+    private final ScheduledExecutorService loadManagerUpdateExecutor;
     private ScheduledExecutorService compactorExecutor;
     private OrderedScheduler offloaderScheduler;
     private OffloadersCache offloadersCache = new OffloadersCache();
@@ -191,6 +205,7 @@ public class PulsarService implements AutoCloseable {
     private ScheduledFuture<?> loadReportTask = null;
     private ScheduledFuture<?> loadSheddingTask = null;
     private ScheduledFuture<?> loadResourceQuotaTask = null;
+    private Future<?> loadStatsUpdaterTask = null;
     private final AtomicReference<LoadManager> loadManager = new AtomicReference<>();
     private PulsarAdmin adminClient = null;
     private PulsarClient client = null;
@@ -284,6 +299,8 @@ public class PulsarService implements AutoCloseable {
         this.shutdownService = new MessagingServiceShutdownHook(this, processTerminator);
         this.loadManagerExecutor = Executors
                 .newSingleThreadScheduledExecutor(new DefaultThreadFactory("pulsar-load-manager"));
+        this.loadManagerUpdateExecutor = Executors
+                .newSingleThreadScheduledExecutor(new DefaultThreadFactory("pulsar-load-updater-manager"));
         this.workerConfig = workerConfig;
         this.functionWorkerService = functionWorkerService;
         this.executor = Executors.newScheduledThreadPool(config.getNumExecutorThreadPoolSize(),
@@ -362,6 +379,7 @@ public class PulsarService implements AutoCloseable {
             }
 
             loadManagerExecutor.shutdown();
+            loadManagerUpdateExecutor.shutdown();
 
             if (globalZkCache != null) {
                 globalZkCache.close();
@@ -681,6 +699,29 @@ public class PulsarService implements AutoCloseable {
 
             this.topicPoliciesService.start();
 
+            if (config.isStoreBundleStatsInSystemTopic()) {
+                try {
+                    getAdminClient().clusters().createCluster(config.getClusterName(),
+                            new ClusterData(webServiceAddress, webServiceAddressTls,
+                                    brokerServiceUrl, brokerServiceUrlTls));
+                    getAdminClient().tenants().createTenant("public",
+                            new TenantInfo(Sets.newHashSet("role1", "role2"),
+                                    Sets.newHashSet(config.getClusterName())));
+                    getAdminClient().namespaces().createNamespace("public/default", 16);
+                    getAdminClient().topics().createPartitionedTopic("non-persistent://public/default/"
+                            + EventsTopicNames.LOAD_BALANCE_STATS_NAME, 3);
+                } catch (Exception e) {
+                    log.warn("Failed to crete cluster/tenant/namespace");
+                }
+
+
+                TopicName topicName = TopicName.get("non-persistent://public/default/"
+                        + EventsTopicNames.LOAD_BALANCE_STATS_NAME);
+                this.loadBalanceStatsEventService = new SystemTopicBasedServiceImpl<>(this, topicName,
+                        EventType.LOAD_BALANCE_STATS);
+                log.info("[hangc] started load balance stats event service...");
+            }
+
             // Start the leader election service
             startLeaderElectionService();
 
@@ -777,11 +818,20 @@ public class PulsarService implements AutoCloseable {
                                 loadResourceQuotaTask.cancel(false);
                             }
                             loadSheddingTask = loadManagerExecutor.scheduleAtFixedRate(
-                                    new LoadSheddingTask(loadManager),
-                                    loadSheddingInterval, loadSheddingInterval, TimeUnit.MILLISECONDS);
+                                new LoadSheddingTask(loadManager),
+                                loadSheddingInterval, loadSheddingInterval, TimeUnit.MILLISECONDS);
                             loadResourceQuotaTask = loadManagerExecutor.scheduleAtFixedRate(
-                                    new LoadResourceQuotaUpdaterTask(loadManager), resourceQuotaUpdateInterval,
-                                    resourceQuotaUpdateInterval, TimeUnit.MILLISECONDS);
+                                new LoadResourceQuotaUpdaterTask(loadManager), resourceQuotaUpdateInterval,
+                                resourceQuotaUpdateInterval, TimeUnit.MILLISECONDS);
+
+                            if (getConfiguration().isStoreBundleStatsInSystemTopic()) {
+                                if (loadStatsUpdaterTask != null) {
+                                    loadStatsUpdaterTask.cancel(true);
+                                }
+
+                                loadStatsUpdaterTask = loadManagerUpdateExecutor.submit(
+                                        new LoadStatsUpdaterTask(loadManager));
+                            }
                         }
                     } else {
                         if (leaderElectionService != null) {
@@ -795,6 +845,10 @@ public class PulsarService implements AutoCloseable {
                         if (loadResourceQuotaTask != null) {
                             loadResourceQuotaTask.cancel(false);
                             loadResourceQuotaTask = null;
+                        }
+
+                        if (loadStatsUpdaterTask != null) {
+                            loadStatsUpdaterTask.cancel(true);
                         }
                     }
                 });
@@ -892,6 +946,7 @@ public class PulsarService implements AutoCloseable {
         if (config.isLoadBalancerEnabled()) {
             LOG.info("Starting load balancer");
             if (this.loadReportTask == null) {
+                log.info("[hangc] bbb...");
                 long loadReportMinInterval = LoadManagerShared.LOAD_REPORT_UPDATE_MIMIMUM_INTERVAL;
                 this.loadReportTask = this.loadManagerExecutor.scheduleAtFixedRate(
                         new LoadReportUpdaterTask(loadManager), loadReportMinInterval, loadReportMinInterval,

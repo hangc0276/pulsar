@@ -20,6 +20,7 @@ package org.apache.pulsar.broker.systopic;
 
 import java.io.IOException;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 import org.apache.pulsar.client.api.Message;
 import org.apache.pulsar.client.api.MessageId;
 import org.apache.pulsar.client.api.Producer;
@@ -137,6 +138,11 @@ public class TopicPoliciesSystemTopicClient extends SystemTopicClientBase<Pulsar
         }
 
         @Override
+        public Message<PulsarEvent> readNext(int timeout, TimeUnit timeUnit) throws PulsarClientException {
+            return reader.readNext(timeout, timeUnit);
+        }
+
+        @Override
         public boolean hasMoreEvents() throws PulsarClientException {
             return reader.hasMessageAvailable();
         }
@@ -161,7 +167,7 @@ public class TopicPoliciesSystemTopicClient extends SystemTopicClientBase<Pulsar
         }
 
         @Override
-        public SystemTopicClient<PulsarEvent> getSystemTopic() {
+        public SystemTopicClient<PulsarEvent> getSystemTopicClient() {
             return systemTopic;
         }
     }

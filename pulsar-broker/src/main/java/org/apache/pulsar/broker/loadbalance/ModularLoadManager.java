@@ -107,6 +107,11 @@ public interface ModularLoadManager {
     void writeBundleDataOnZooKeeper();
 
     /**
+     * As the leader broker, read bundle stats from system topic and update to loadData.
+     */
+    void readStatsFromSystemTopic();
+
+    /**
      * Return :{@link Deserializer} to deserialize load-manager load report.
      *
      * @return

@@ -16,25 +16,23 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-package org.apache.pulsar.common.events;
+package org.apache.pulsar.broker.service.nonpersistent;
 
-/**
- * Pulsar system event type.
- */
-public enum EventType {
+import org.apache.pulsar.broker.service.BrokerService;
 
-    /**
-     * Topic policy events.
-     */
-    TOPIC_POLICY,
+public class NonPersistentSystemTopic extends NonPersistentTopic {
 
-    /**
-     * Transaction buffer snapshot events.
-     */
-    TRANSACTION_BUFFER_SNAPSHOT,
+    public NonPersistentSystemTopic(String topic, BrokerService brokerService) {
+        super(topic, brokerService);
+    }
 
-    /**
-     * Load balance stats
-     */
-    LOAD_BALANCE_STATS
+    @Override
+    public boolean isSystemTopic() {
+        return true;
+    }
+
+    @Override
+    public void checkGC() {
+        // do nothing for system topic
+    }
 }

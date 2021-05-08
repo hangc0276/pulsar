@@ -1716,6 +1716,12 @@ public class ServiceConfiguration implements PulsarConfiguration {
     )
     private Double loadBalancerOverrideBrokerNicSpeedGbps;
 
+    @FieldContext(
+        category = CATEGORY_LOAD_BALANCER,
+        doc = "Put bundle stats into system topic instead of zookeeper, default is false"
+    )
+    private boolean storeBundleStatsInSystemTopic = false;
+
     /**** --- Replication --- ****/
     @FieldContext(
         category = CATEGORY_REPLICATION,

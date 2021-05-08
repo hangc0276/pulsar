@@ -18,23 +18,31 @@
  */
 package org.apache.pulsar.common.events;
 
+import lombok.AllArgsConstructor;
+import lombok.Builder;
+import lombok.Data;
+import lombok.Getter;
+import lombok.NoArgsConstructor;
+import lombok.Setter;
+import org.apache.pulsar.common.policies.data.BundlesData;
+import org.apache.pulsar.policies.data.loadbalancer.BundleData;
+import org.apache.pulsar.policies.data.loadbalancer.LocalBrokerData;
+import org.apache.pulsar.policies.data.loadbalancer.TimeAverageBrokerData;
+
 /**
- * Pulsar system event type.
+ * Load balance stats event.
  */
-public enum EventType {
-
-    /**
-     * Topic policy events.
-     */
-    TOPIC_POLICY,
-
-    /**
-     * Transaction buffer snapshot events.
-     */
-    TRANSACTION_BUFFER_SNAPSHOT,
-
-    /**
-     * Load balance stats
-     */
-    LOAD_BALANCE_STATS
+@Data
+@Builder
+@NoArgsConstructor
+@AllArgsConstructor
+@Getter
+@Setter
+public class LoadBalanceStatsEvent extends BaseEvent {
+    private LoadType loadType;
+    private String broker;
+    private String bundle;
+    private LocalBrokerData brokerData;
+    private BundleData bundleData;
+    private TimeAverageBrokerData timeAverageBrokerData;
 }

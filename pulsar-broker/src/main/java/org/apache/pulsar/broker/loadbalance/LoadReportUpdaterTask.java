@@ -36,6 +36,7 @@ public class LoadReportUpdaterTask implements Runnable {
     @Override
     public void run() {
         try {
+            LOG.info("[hangc] start load report updater task...");
             loadManager.get().writeLoadReportOnZookeeper();
         } catch (Exception e) {
             LOG.warn("Unable to write load report on Zookeeper", e);

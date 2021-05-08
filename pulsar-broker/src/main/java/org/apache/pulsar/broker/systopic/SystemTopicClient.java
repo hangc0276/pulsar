@@ -21,6 +21,7 @@ package org.apache.pulsar.broker.systopic;
 import java.io.IOException;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 import org.apache.pulsar.client.api.Message;
 import org.apache.pulsar.client.api.MessageId;
 import org.apache.pulsar.client.api.PulsarClientException;
@@ -138,6 +139,8 @@ public interface SystemTopicClient<T> {
          */
         CompletableFuture<Message<T>> readNextAsync();
 
+        Message<T> readNext(int timeout, TimeUnit timeUnit) throws PulsarClientException;
+
         /**
          * Check has more events available for the reader.
          * @return true if has remaining events, otherwise false
@@ -164,7 +167,7 @@ public interface SystemTopicClient<T> {
          * Get the system topic of the reader.
          * @return system topic
          */
-        SystemTopicClient<T> getSystemTopic();
+        SystemTopicClient<T> getSystemTopicClient();
     }
 
     static boolean isSystemTopic(TopicName topicName) {

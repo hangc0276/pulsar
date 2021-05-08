@@ -18,23 +18,5 @@
  */
 package org.apache.pulsar.common.events;
 
-/**
- * Pulsar system event type.
- */
-public enum EventType {
-
-    /**
-     * Topic policy events.
-     */
-    TOPIC_POLICY,
-
-    /**
-     * Transaction buffer snapshot events.
-     */
-    TRANSACTION_BUFFER_SNAPSHOT,
-
-    /**
-     * Load balance stats
-     */
-    LOAD_BALANCE_STATS
+public abstract class BaseEvent {
 }

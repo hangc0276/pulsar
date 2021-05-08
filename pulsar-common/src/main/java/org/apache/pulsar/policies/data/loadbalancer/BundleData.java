@@ -16,14 +16,21 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-package org.apache.pulsar.broker;
+package org.apache.pulsar.policies.data.loadbalancer;
 
+import lombok.Getter;
+import lombok.Setter;
 import org.apache.pulsar.policies.data.loadbalancer.JSONWritable;
 import org.apache.pulsar.policies.data.loadbalancer.NamespaceBundleStats;
+
+import java.util.HashSet;
+import java.util.Set;
 
 /**
  * Data class comprising the short term and long term historical data for this bundle.
  */
+@Getter
+@Setter
 public class BundleData extends JSONWritable {
     // Short term data for this bundle. The time frame of this data is
     // determined by the number of short term samples
@@ -37,6 +44,8 @@ public class BundleData extends JSONWritable {
 
     // number of topics present under this bundle
     private int topics;
+
+    private HashSet<String> bundles;
 
     // For JSON only.
     public BundleData() {

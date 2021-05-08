@@ -16,25 +16,28 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-package org.apache.pulsar.common.events;
+package org.apache.pulsar.broker.loadbalance;
+
+import java.util.concurrent.atomic.AtomicReference;
+import lombok.extern.slf4j.Slf4j;
 
 /**
- * Pulsar system event type.
+ * LoadManager namespace bundle stats update task.
  */
-public enum EventType {
+@Slf4j
+public class LoadStatsUpdaterTask implements Runnable {
+    private final AtomicReference<LoadManager> loadManager;
 
-    /**
-     * Topic policy events.
-     */
-    TOPIC_POLICY,
+    public LoadStatsUpdaterTask(AtomicReference<LoadManager> loadManager) {
+        this.loadManager = loadManager;
+    }
 
-    /**
-     * Transaction buffer snapshot events.
-     */
-    TRANSACTION_BUFFER_SNAPSHOT,
-
-    /**
-     * Load balance stats
-     */
-    LOAD_BALANCE_STATS
+    @Override
+    public void run() {
+        try {
+            this.loadManager.get().readStatsFromSystemTopic();
+        } catch (Exception e) {
+            log.warn("Error read load stats from system topic. ", e);
+        }
+    }
 }

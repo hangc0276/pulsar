@@ -21,6 +21,7 @@ package org.apache.pulsar.broker.systopic;
 
 import java.io.IOException;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.pulsar.broker.service.TransactionBufferSnapshotService;
 import org.apache.pulsar.broker.transaction.buffer.matadata.TransactionBufferSnapshot;
@@ -141,6 +142,12 @@ public class TransactionBufferSystemTopicClient extends SystemTopicClientBase<Tr
         }
 
         @Override
+        public Message<TransactionBufferSnapshot> readNext(int timeout, TimeUnit timeUnit)
+                throws PulsarClientException {
+            return reader.readNext(timeout, timeUnit);
+        }
+
+        @Override
         public CompletableFuture<Message<TransactionBufferSnapshot>> readNextAsync() {
             return reader.readNextAsync();
         }
@@ -170,7 +177,7 @@ public class TransactionBufferSystemTopicClient extends SystemTopicClientBase<Tr
         }
 
         @Override
-        public SystemTopicClient<TransactionBufferSnapshot> getSystemTopic() {
+        public SystemTopicClient<TransactionBufferSnapshot> getSystemTopicClient() {
             return transactionBufferSystemTopicClient;
         }
     }
