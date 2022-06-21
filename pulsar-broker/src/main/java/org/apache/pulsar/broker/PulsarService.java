@@ -1220,7 +1220,7 @@ public class PulsarService implements AutoCloseable, ShutdownService {
                 LedgerOffloaderFactory offloaderFactory = offloaders.getOffloaderFactory(
                         offloadPolicies.getManagedLedgerOffloadDriver());
                 try {
-                    return offloaderFactory.create(
+                    return (LedgerOffloader) offloaderFactory.create(
                         offloadPolicies,
                         ImmutableMap.of(
                             LedgerOffloader.METADATA_SOFTWARE_VERSION_KEY.toLowerCase(), PulsarVersion.getVersion(),
