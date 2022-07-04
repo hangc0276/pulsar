@@ -19,7 +19,7 @@
 package org.apache.bookkeeper.mledger;
 
 import java.util.concurrent.CompletableFuture;
-import org.apache.pulsar.client.api.Consumer;
+import org.apache.pulsar.common.policies.data.OffloadPoliciesImpl;
 
 /**
  * The offload service is used for offload the message from a topic.
@@ -38,12 +38,23 @@ public interface OffloadService {
      * @param topic
      * @return
      */
-    CompletableFuture<Consumer<byte[]>> offload(String topic);
+    CompletableFuture<Void> offload(String topic);
 
     /**
      * Close the offload service.
      * @return
      */
     CompletableFuture<Void> closeAsync();
+
+    String getOffloadDriverName();
+
+    /**
+     * Get offload policies of this LedgerOffloader
+     *
+     * @return offload policies
+     */
+    OffloadPoliciesImpl getOffloadPolicies();
+
+    void close();
 }
 

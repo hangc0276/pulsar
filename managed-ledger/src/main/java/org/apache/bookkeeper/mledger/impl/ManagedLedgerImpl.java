@@ -2778,7 +2778,20 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
     }
 
     @Override
+    public void asyncOffloadService(String topicName, String operationType, AsyncCallbacks.OffloadServiceCallback callback, Object ctx) {
+        log.info("[hangc] offload service: {}", topicName);
+        config.getOffloadService().offload(topicName).whenComplete((ignore, e) -> {
+            if (e != null) {
+                callback.offloadFailed(ManagedLedgerException.getManagedLedgerException(e), null);
+            } else {
+                callback.offloadComplete(null);
+            }
+        });
+    }
+
+    @Override
     public void asyncOffloadPrefix(Position pos, OffloadCallback callback, Object ctx) {
+        log.info("[hangc] lalala {}", name);
         PositionImpl requestOffloadTo = (PositionImpl) pos;
         if (!isValidPosition(requestOffloadTo) &&
                 // Also consider the case where the last ledger is currently
