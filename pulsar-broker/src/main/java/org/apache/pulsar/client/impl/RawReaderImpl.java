@@ -207,9 +207,12 @@ public class RawReaderImpl implements RawReader {
                 log.debug("[{}][{}] Received raw message: {}/{}/{}", topic, subscription,
                         messageId.getEntryId(), messageId.getLedgerId(), messageId.getPartition());
             }
-            incomingRawMessages.add(
+            internalPinnedExecutor.execute(() -> {
+                incomingRawMessages.add(
                     new RawMessageAndCnx(new RawMessageImpl(messageId, headersAndPayload), cnx));
-            tryCompletePending();
+                tryCompletePending();
+            });
+
         }
     }
 
