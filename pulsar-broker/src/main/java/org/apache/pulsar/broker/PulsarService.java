@@ -1296,7 +1296,6 @@ public class PulsarService implements AutoCloseable, ShutdownService {
                                                             OrderedExecutor executor,
                                                             OrderedScheduler scheduler)
         throws PulsarServerException {
-        LOG.info("[hangc] create offload service...");
         try {
             if (StringUtils.isNotBlank(offloadPolicies.getManagedLedgerOffloadDriver())) {
                 checkNotNull(offloadPolicies.getOffloadersDirectory(),

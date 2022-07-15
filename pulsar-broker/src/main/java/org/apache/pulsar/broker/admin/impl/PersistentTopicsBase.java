@@ -3536,9 +3536,7 @@ public class PersistentTopicsBase extends AdminResource {
         validateTopicOwnership(topicName, authoritative);
         validateTopicOperation(topicName, TopicOperation.OFFLOAD);
 
-        log.info("[hangc] xxx {}", topicName);
         PersistentTopic topic = (PersistentTopic) getTopicReference(topicName);
-        log.info("[hangc] kkk {}", topic);
         try {
             topic.triggerOffload(messageId);
         } catch (AlreadyRunningException e) {
@@ -3550,15 +3548,11 @@ public class PersistentTopicsBase extends AdminResource {
     }
 
     protected void internalTriggerOffloadService(boolean authoritative, String operationType) {
-        log.info("[hangc] ddd");
         validateTopicOwnership(topicName, authoritative);
-        log.info("[hangc] eee");
         validateTopicOperation(topicName, TopicOperation.OFFLOAD);
 
-        log.info("[hangc] fff {}", topicName);
         PersistentTopic topic = (PersistentTopic) getTopicReference(topicName);
         try {
-            log.info("[hangc] ggg");
             topic.triggerOffloadService(operationType);
         } catch (AlreadyRunningException e) {
             throw new RestException(Status.CONFLICT, e.getMessage());
@@ -3659,10 +3653,8 @@ public class PersistentTopicsBase extends AdminResource {
                     .get(pulsar().getConfiguration().getZooKeeperOperationTimeoutSeconds(), TimeUnit.SECONDS)
                     .orElseThrow(() -> topicNotFoundReason(topicName));
         } catch (RestException e) {
-            log.error("[hangc] xxx ", e);
             throw e;
         } catch (Exception e) {
-            log.error("[hangc] yyy ", e);
             if (e.getCause() instanceof NotAllowedException) {
                 throw new RestException(Status.BAD_REQUEST, e.getCause());
             }

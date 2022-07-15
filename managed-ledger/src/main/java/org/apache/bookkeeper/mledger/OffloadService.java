@@ -19,6 +19,9 @@
 package org.apache.bookkeeper.mledger;
 
 import java.util.concurrent.CompletableFuture;
+import org.apache.bookkeeper.client.api.ReadHandle;
+import org.apache.bookkeeper.common.util.OrderedExecutor;
+import org.apache.pulsar.broker.ServiceConfiguration;
 import org.apache.pulsar.common.policies.data.OffloadPoliciesImpl;
 
 /**
@@ -54,6 +57,22 @@ public interface OffloadService {
      * @return offload policies
      */
     OffloadPoliciesImpl getOffloadPolicies();
+
+    /**
+     * Get related ledger's ReadHandle.
+     * @param ledgerId
+     * @return
+     */
+    CompletableFuture<ReadHandle> readOffloaded(long ledgerId);
+
+    /**
+     * Get related ledger's ReadHandle.
+     * @param ledgerId
+     * @param executor
+     * @param conf
+     * @return
+     */
+    CompletableFuture<ReadHandle> readOffloaded(long ledgerId, OrderedExecutor executor, ServiceConfiguration conf);
 
     void close();
 }

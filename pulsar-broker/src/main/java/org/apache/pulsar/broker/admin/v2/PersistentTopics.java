@@ -2660,11 +2660,8 @@ public class PersistentTopics extends PersistentTopicsBase {
             || (!"start".equals(operationType) && !"stop".equals(operationType) && !"status".equals(operationType))) {
             throw new RestException(Response.Status.BAD_REQUEST, "operation type is invalid");
         }
-        log.info("[hangc] aaa");
         validateTopicName(tenant, namespace, encodedTopic);
-        log.info("[hangc] bbb");
         internalTriggerOffloadService(authoritative, operationType);
-        log.info("[hangc] ccc");
     }
 
     @GET
