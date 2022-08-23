@@ -63,7 +63,7 @@ public interface OffloadService {
      * @param ledgerId
      * @return
      */
-    CompletableFuture<ReadHandle> readOffloaded(long ledgerId);
+    CompletableFuture<ReadHandle> readOffloaded(long ledgerId, String managedLedgerName);
 
     /**
      * Get related ledger's ReadHandle.
@@ -72,7 +72,8 @@ public interface OffloadService {
      * @param conf
      * @return
      */
-    CompletableFuture<ReadHandle> readOffloaded(long ledgerId, OrderedExecutor executor, ServiceConfiguration conf);
+    CompletableFuture<ReadHandle> readOffloaded(long ledgerId, String managedLedgerName,
+                                                OrderedExecutor executor, ServiceConfiguration conf);
 
     void close();
 }

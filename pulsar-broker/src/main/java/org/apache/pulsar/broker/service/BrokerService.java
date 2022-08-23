@@ -1505,7 +1505,8 @@ public class BrokerService implements Closeable {
                             OffloadService topicLevelOffloadService =
                                 pulsar().createOffloadService(serviceConfig, offloadPolicies, pulsar.getClient(),
                                     pulsar.getAdminClient(), pulsar.getBookKeeperClient(), pulsar.getOrderedExecutor(),
-                                    pulsar.getOffloaderScheduler());
+                                    pulsar.getOffloaderScheduler(),
+                                    pulsar.getStatsProvider().getStatsLogger("offload_service"));
                             managedLedgerConfig.setOffloadService(topicLevelOffloadService);
                         } catch (PulsarServerException e) {
                             throw new RuntimeException(e);
@@ -1518,7 +1519,8 @@ public class BrokerService implements Closeable {
                             managedLedgerConfig.setOffloadService(pulsar.getOffloadService(namespace, offloadPolicies,
                                 serviceConfig, pulsar.getClient(), pulsar.getAdminClient(),
                                 pulsar.getBookKeeperClient(),
-                                pulsar.getOrderedExecutor(), pulsar.getOffloaderScheduler()));
+                                pulsar.getOrderedExecutor(), pulsar.getOffloaderScheduler(),
+                                pulsar.getStatsProvider().getStatsLogger("offload_service")));
                         } catch (PulsarServerException e) {
                             throw new RuntimeException(e);
                         }
