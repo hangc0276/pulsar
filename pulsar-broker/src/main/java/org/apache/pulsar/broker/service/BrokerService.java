@@ -86,6 +86,7 @@ import org.apache.bookkeeper.mledger.ManagedLedgerConfig;
 import org.apache.bookkeeper.mledger.ManagedLedgerException;
 import org.apache.bookkeeper.mledger.ManagedLedgerException.ManagedLedgerNotFoundException;
 import org.apache.bookkeeper.mledger.ManagedLedgerFactory;
+import org.apache.bookkeeper.mledger.OffloadService;
 import org.apache.bookkeeper.mledger.util.Futures;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.lang3.tuple.ImmutablePair;
@@ -1500,6 +1501,13 @@ public class BrokerService implements Closeable {
                             LedgerOffloader topicLevelLedgerOffLoader =
                                     pulsar().createManagedLedgerOffloader(offloadPolicies);
                             managedLedgerConfig.setLedgerOffloader(topicLevelLedgerOffLoader);
+
+                            OffloadService topicLevelOffloadService =
+                                pulsar().createOffloadService(serviceConfig, offloadPolicies, pulsar.getClient(),
+                                    pulsar.getAdminClient(), pulsar.getBookKeeperClient(), pulsar.getOrderedExecutor(),
+                                    pulsar.getOffloaderScheduler(),
+                                    pulsar.getStatsProvider().getStatsLogger("offload_service"));
+                            managedLedgerConfig.setOffloadService(topicLevelOffloadService);
                         } catch (PulsarServerException e) {
                             throw new RuntimeException(e);
                         }
@@ -1507,6 +1515,15 @@ public class BrokerService implements Closeable {
                         //If the topic level policy is null, use the namespace level
                         managedLedgerConfig
                                 .setLedgerOffloader(pulsar.getManagedLedgerOffloader(namespace, offloadPolicies));
+                        try {
+                            managedLedgerConfig.setOffloadService(pulsar.getOffloadService(namespace, offloadPolicies,
+                                serviceConfig, pulsar.getClient(), pulsar.getAdminClient(),
+                                pulsar.getBookKeeperClient(),
+                                pulsar.getOrderedExecutor(), pulsar.getOffloaderScheduler(),
+                                pulsar.getStatsProvider().getStatsLogger("offload_service")));
+                        } catch (PulsarServerException e) {
+                            throw new RuntimeException(e);
+                        }
                     }
 
                     managedLedgerConfig.setDeletionAtBatchIndexLevelEnabled(
