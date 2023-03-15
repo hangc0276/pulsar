@@ -490,13 +490,10 @@ public class ServerCnxTest {
         when(brokerService.getAuthenticationService()).thenReturn(authenticationService);
         when(authenticationService.getAuthenticationProvider(authMethodName)).thenReturn(authenticationProvider);
         svcConfig.setAuthenticationEnabled(true);
-        svcConfig.setAuthenticationRefreshCheckSeconds(1);
 
         resetChannel();
         assertTrue(channel.isActive());
         assertEquals(serverCnx.getState(), State.Start);
-        // Don't want the keep alive task affecting which messages are handled
-        serverCnx.cancelKeepAliveTask();
 
         ByteBuf clientCommand = Commands.newConnect(authMethodName, "pass.client", "");
         channel.writeInbound(clientCommand);
@@ -509,10 +506,8 @@ public class ServerCnxTest {
 
         // Trigger the ServerCnx to check if authentication is expired (it is because of our special implementation)
         // and then force channel to run the task
-        while (channel.outboundMessages().isEmpty()) {
-            Thread.sleep(100);
-            channel.runPendingTasks();
-        }
+        serverCnx.refreshAuthenticationCredentials();
+        channel.runPendingTasks();
         Object responseAuthChallenge1 = getResponse();
         assertTrue(responseAuthChallenge1 instanceof CommandAuthChallenge);
 
@@ -521,10 +516,8 @@ public class ServerCnxTest {
         channel.writeInbound(authResponse1);
 
         // Trigger the ServerCnx to check if authentication is expired again
-        while (channel.outboundMessages().isEmpty()) {
-            Thread.sleep(100);
-            channel.runPendingTasks();
-        }
+        serverCnx.refreshAuthenticationCredentials();
+        channel.runPendingTasks();
         Object responseAuthChallenge2 = getResponse();
         assertTrue(responseAuthChallenge2 instanceof CommandAuthChallenge);
 
@@ -548,13 +541,10 @@ public class ServerCnxTest {
         svcConfig.setAuthenticationEnabled(true);
         svcConfig.setAuthenticateOriginalAuthData(true);
         svcConfig.setProxyRoles(Collections.singleton("pass.proxy"));
-        svcConfig.setAuthenticationRefreshCheckSeconds(1);
 
         resetChannel();
         assertTrue(channel.isActive());
         assertEquals(serverCnx.getState(), State.Start);
-        // Don't want the keep alive task affecting which messages are handled
-        serverCnx.cancelKeepAliveTask();
 
         ByteBuf clientCommand = Commands.newConnect(authMethodName, "pass.proxy", 1, null,
                 null, "pass.client", "pass.client", authMethodName);
@@ -571,10 +561,8 @@ public class ServerCnxTest {
 
         // Trigger the ServerCnx to check if authentication is expired (it is because of our special implementation)
         // and then force channel to run the task
-        while (channel.outboundMessages().isEmpty()) {
-            Thread.sleep(100);
-            channel.runPendingTasks();
-        }
+        serverCnx.refreshAuthenticationCredentials();
+        channel.runPendingTasks();
         Object responseAuthChallenge1 = getResponse();
         assertTrue(responseAuthChallenge1 instanceof CommandAuthChallenge);
 
@@ -583,10 +571,8 @@ public class ServerCnxTest {
         channel.writeInbound(authResponse1);
 
         // Trigger the ServerCnx to check if authentication is expired again
-        while (channel.outboundMessages().isEmpty()) {
-            Thread.sleep(100);
-            channel.runPendingTasks();
-        }
+        serverCnx.refreshAuthenticationCredentials();
+        channel.runPendingTasks();
         Object responseAuthChallenge2 = getResponse();
         assertTrue(responseAuthChallenge2 instanceof CommandAuthChallenge);
 
