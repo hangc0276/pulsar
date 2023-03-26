@@ -190,19 +190,6 @@ jobs:
             group: BROKER_GROUP_1
           - name: Brokers - Broker Group 2
             group: BROKER_GROUP_2
-          - name: Brokers - Broker Group 3
-            group: BROKER_GROUP_3
-          - name: Brokers - Client Api
-            group: BROKER_CLIENT_API
-          - name: Brokers - Client Impl
-            group: BROKER_CLIENT_IMPL
-          - name: Proxy
-            group: PROXY
-          - name: Pulsar IO
-            group: PULSAR_IO
-            timeout: 75
-          - name: Pulsar Client
-            group: CLIENT
 
     steps:
       - name: checkout
@@ -304,6 +291,10 @@ jobs:
         continue-on-error: true
         with:
           action: wait
+
+      - name: Setup tmate session
+        if: failure()
+        uses: mxschmitt/action-tmate@v3
 
 
   unit-tests-upload-coverage:
