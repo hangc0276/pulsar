@@ -246,7 +246,6 @@ public class PulsarService implements AutoCloseable, ShutdownService {
     private TransactionBufferProvider transactionBufferProvider;
     private TransactionBufferClient transactionBufferClient;
     private HashedWheelTimer transactionTimer;
-
     private BrokerInterceptor brokerInterceptor;
     private AdditionalServlets brokerAdditionalServlets;
 
