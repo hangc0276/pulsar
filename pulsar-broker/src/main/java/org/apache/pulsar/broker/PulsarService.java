@@ -397,6 +397,8 @@ public class PulsarService implements AutoCloseable, ShutdownService {
         }
     }
 
+    // triger ci
+
     /**
      * Close the current pulsar service. All resources are released.
      */

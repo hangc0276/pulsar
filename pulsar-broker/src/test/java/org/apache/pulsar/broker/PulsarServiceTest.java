@@ -266,4 +266,9 @@ public class PulsarServiceTest extends MockedPulsarServiceBaseTest {
             assertFalse(e.getCause() instanceof IllegalArgumentException);
         }
     }
+
+    @Test
+    public void test() {
+        log.info("trigger ci");
+    }
 }
