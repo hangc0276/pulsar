@@ -190,4 +190,9 @@ public class PulsarServiceTest extends MockedPulsarServiceBaseTest {
         assertEquals(pulsar.getWebServiceAddressTls(), "https://localhost:" + pulsar.getWebService().getListenPortHTTPS().get());
     }
 
+    @Test
+    public void test() {
+        log.info("trigger ci");
+    }
+
 }
