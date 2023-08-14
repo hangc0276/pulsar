@@ -718,4 +718,9 @@ public class ManagedCursorContainerTest {
 
         assertFalse(container.hasDurableCursors());
     }
+
+    @Test
+    public void test() {
+        System.out.println("xxx");
+    }
 }
