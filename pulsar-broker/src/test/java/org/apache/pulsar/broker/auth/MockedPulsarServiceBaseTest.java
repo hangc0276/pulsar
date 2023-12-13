@@ -25,6 +25,7 @@ import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.when;
+import static org.testng.Assert.assertEquals;
 import com.google.common.collect.Sets;
 import com.google.common.util.concurrent.MoreExecutors;
 import io.netty.channel.EventLoopGroup;
@@ -53,18 +54,27 @@ import org.apache.bookkeeper.stats.StatsLogger;
 import org.apache.bookkeeper.util.ZkUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.pulsar.broker.BookKeeperClientFactory;
+import javax.ws.rs.container.AsyncResponse;
+import javax.ws.rs.container.TimeoutHandler;
+import lombok.AllArgsConstructor;
+import lombok.Data;
 import org.apache.pulsar.broker.PulsarService;
 import org.apache.pulsar.broker.ServiceConfiguration;
+import org.apache.pulsar.broker.authentication.AuthenticationProviderTls;
 import org.apache.pulsar.broker.intercept.CounterBrokerInterceptor;
 import org.apache.pulsar.broker.namespace.NamespaceService;
 import org.apache.pulsar.broker.service.BrokerTestBase;
 import org.apache.pulsar.broker.service.PulsarMetadataEventSynchronizer;
+import org.apache.pulsar.broker.service.persistent.PersistentTopic;
 import org.apache.pulsar.client.admin.PulsarAdmin;
 import org.apache.pulsar.client.admin.PulsarAdminBuilder;
 import org.apache.pulsar.client.admin.PulsarAdminException;
 import org.apache.pulsar.client.api.ClientBuilder;
 import org.apache.pulsar.client.api.PulsarClient;
 import org.apache.pulsar.client.api.PulsarClientException;
+import org.apache.pulsar.client.impl.auth.AuthenticationDisabled;
+import org.apache.pulsar.client.impl.auth.AuthenticationTls;
+import org.apache.pulsar.client.impl.ProducerImpl;
 import org.apache.pulsar.common.policies.data.ClusterData;
 import org.apache.pulsar.common.policies.data.TenantInfo;
 import org.apache.pulsar.common.policies.data.TenantInfoImpl;
@@ -77,11 +87,9 @@ import org.apache.pulsar.utils.ResourceUtils;
 import org.apache.zookeeper.CreateMode;
 import org.apache.zookeeper.MockZooKeeper;
 import org.apache.zookeeper.data.ACL;
+import org.awaitility.reflect.WhiteboxImpl;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import javax.ws.rs.container.AsyncResponse;
-import javax.ws.rs.container.TimeoutHandler;
 
 /**
  * Base class for all tests that need a Pulsar instance without a ZK and BK cluster.
@@ -229,6 +237,23 @@ public abstract class MockedPulsarServiceBaseTest extends TestRetrySupport {
         mockZooKeeperGlobal = createMockZooKeeperGlobal();
         mockBookKeeper = createMockBookKeeper(bkExecutor);
 
+        // trying to config the broker internal client
+        if (conf.getWebServicePortTls().isPresent()
+            && conf.getAuthenticationProviders().contains(AuthenticationProviderTls.class.getName())
+            && !conf.isTlsEnabledWithKeyStore()) {
+            // enabled TLS
+            if (conf.getBrokerClientAuthenticationPlugin() == null
+                || conf.getBrokerClientAuthenticationPlugin().equals(AuthenticationDisabled.class.getName())) {
+                conf.setBrokerClientAuthenticationPlugin(AuthenticationTls.class.getName());
+                conf.setBrokerClientTlsEnabledWithKeyStore(true);
+                conf.setBrokerClientTlsKeyStoreType(KEYSTORE_TYPE);
+                conf.setBrokerClientTlsKeyStore(BROKER_KEYSTORE_FILE_PATH);
+                conf.setBrokerClientTlsKeyStorePassword(BROKER_KEYSTORE_PW);
+                conf.setBrokerClientTlsTrustStoreType(KEYSTORE_TYPE);
+                conf.setBrokerClientTlsTrustStore(BROKER_TRUSTSTORE_FILE_PATH);
+                conf.setBrokerClientTlsTrustStorePassword(BROKER_TRUSTSTORE_PW);
+            }
+        }
         startBroker();
     }
 
@@ -360,7 +385,7 @@ public abstract class MockedPulsarServiceBaseTest extends TestRetrySupport {
     protected void setupBrokerMocks(PulsarService pulsar) throws Exception {
         // Override default providers with mocked ones
         doReturn(mockBookKeeperClientFactory).when(pulsar).newBookKeeperClientFactory();
-        
+
         PulsarMetadataEventSynchronizer synchronizer = StringUtils
                 .isNotBlank(pulsar.getConfig().getMetadataSyncEventTopic())
                         ? new PulsarMetadataEventSynchronizer(pulsar, pulsar.getConfig().getMetadataSyncEventTopic())
@@ -667,6 +692,24 @@ public abstract class MockedPulsarServiceBaseTest extends TestRetrySupport {
     protected void deleteNamespaceGraceFully(String ns, boolean force, PulsarAdmin admin)
             throws Exception {
         BrokerTestBase.deleteNamespaceGraceFully(ns, force, pulsar, admin);
+    }
+
+    protected ServiceProducer getServiceProducer(ProducerImpl clientProducer, String topicName) {
+        PersistentTopic persistentTopic =
+                (PersistentTopic) pulsar.getBrokerService().getTopic(topicName, false).join().get();
+        org.apache.pulsar.broker.service.Producer serviceProducer =
+                persistentTopic.getProducers().get(clientProducer.getProducerName());
+        long clientProducerId = WhiteboxImpl.getInternalState(clientProducer, "producerId");
+        assertEquals(serviceProducer.getProducerId(), clientProducerId);
+        assertEquals(serviceProducer.getEpoch(), clientProducer.getConnectionHandler().getEpoch());
+        return new ServiceProducer(serviceProducer, persistentTopic);
+    }
+
+    @Data
+    @AllArgsConstructor
+    public static class ServiceProducer {
+        private org.apache.pulsar.broker.service.Producer serviceProducer;
+        private PersistentTopic persistentTopic;
     }
 
     private static final Logger log = LoggerFactory.getLogger(MockedPulsarServiceBaseTest.class);

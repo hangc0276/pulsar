@@ -19,6 +19,7 @@
 package org.apache.pulsar.broker.service;
 
 import static com.google.common.base.Preconditions.checkArgument;
+import static java.util.Objects.requireNonNull;
 import static org.apache.bookkeeper.mledger.impl.ManagedLedgerMBeanImpl.ENTRY_LATENCY_BUCKETS_USEC;
 import com.google.common.base.MoreObjects;
 import com.google.common.collect.Lists;
@@ -36,10 +37,12 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
 import java.util.concurrent.atomic.AtomicLongFieldUpdater;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.function.ToLongFunction;
+import javax.annotation.Nonnull;
 import lombok.Getter;
 import org.apache.bookkeeper.mledger.util.StatsBuckets;
 import org.apache.commons.collections4.CollectionUtils;
@@ -57,6 +60,7 @@ import org.apache.pulsar.broker.service.schema.SchemaRegistryService;
 import org.apache.pulsar.broker.service.schema.exceptions.IncompatibleSchemaException;
 import org.apache.pulsar.broker.stats.prometheus.metrics.Summary;
 import org.apache.pulsar.common.api.proto.CommandSubscribe.SubType;
+import org.apache.pulsar.common.naming.NamespaceName;
 import org.apache.pulsar.common.naming.TopicName;
 import org.apache.pulsar.common.policies.data.BacklogQuota;
 import org.apache.pulsar.common.policies.data.DelayedDeliveryPolicies;
@@ -110,7 +114,7 @@ public abstract class AbstractTopic implements Topic, TopicPolicyListener<TopicP
 
     protected volatile Boolean isAllowAutoUpdateSchema;
 
-    protected volatile PublishRateLimiter topicPublishRateLimiter;
+    protected volatile PublishRateLimiter topicPublishRateLimiter = PublishRateLimiter.DISABLED_RATE_LIMITER;
     private final Object topicPublishRateLimiterLock = new Object();
 
     protected volatile ResourceGroupPublishLimiter resourceGroupPublishLimiter;
@@ -126,7 +130,11 @@ public abstract class AbstractTopic implements Topic, TopicPolicyListener<TopicP
 
     private static final AtomicLongFieldUpdater<AbstractTopic> RATE_LIMITED_UPDATER =
             AtomicLongFieldUpdater.newUpdater(AbstractTopic.class, "publishRateLimitedTimes");
-    protected volatile long publishRateLimitedTimes = 0;
+    protected volatile long publishRateLimitedTimes = 0L;
+
+    private static final AtomicIntegerFieldUpdater<AbstractTopic> USER_CREATED_PRODUCER_COUNTER_UPDATER =
+            AtomicIntegerFieldUpdater.newUpdater(AbstractTopic.class, "userCreatedProducerCount");
+    protected volatile int userCreatedProducerCount = 0;
 
     protected volatile Optional<Long> topicEpoch = Optional.empty();
     private volatile boolean hasExclusiveProducer;
@@ -426,14 +434,8 @@ public abstract class AbstractTopic implements Topic, TopicPolicyListener<TopicP
             return false;
         }
         Integer maxProducers = topicPolicies.getMaxProducersPerTopic().get();
-        if (maxProducers != null && maxProducers > 0 && maxProducers <= getUserCreatedProducersSize()) {
-            return true;
-        }
-        return false;
-    }
-
-    private long getUserCreatedProducersSize() {
-        return producers.values().stream().filter(p -> !p.isRemote()).count();
+        return maxProducers != null && maxProducers > 0
+                && maxProducers <= USER_CREATED_PRODUCER_COUNTER_UPDATER.get(this);
     }
 
     protected void registerTopicPolicyListener() {
@@ -693,15 +695,14 @@ public abstract class AbstractTopic implements Topic, TopicPolicyListener<TopicP
                             log.warn("[{}] Attempting to add producer to a terminated topic", topic);
                             throw new TopicTerminatedException("Topic was already terminated");
                         }
-                        internalAddProducer(producer);
-
-                        USAGE_COUNT_UPDATER.incrementAndGet(this);
-                        if (log.isDebugEnabled()) {
-                            log.debug("[{}] [{}] Added producer -- count: {}", topic, producer.getProducerName(),
-                                    USAGE_COUNT_UPDATER.get(this));
-                        }
-
-                        return CompletableFuture.completedFuture(producerEpoch);
+                        return internalAddProducer(producer).thenApply(ignore -> {
+                            USAGE_COUNT_UPDATER.incrementAndGet(this);
+                            if (log.isDebugEnabled()) {
+                                log.debug("[{}] [{}] Added producer -- count: {}", topic, producer.getProducerName(),
+                                        USAGE_COUNT_UPDATER.get(this));
+                            }
+                            return producerEpoch;
+                        });
                     } catch (BrokerServiceException e) {
                         return FutureUtil.failedFuture(e);
                     } finally {
@@ -956,15 +957,17 @@ public abstract class AbstractTopic implements Topic, TopicPolicyListener<TopicP
         }
     }
 
-    protected void internalAddProducer(Producer producer) throws BrokerServiceException {
+    protected CompletableFuture<Void> internalAddProducer(Producer producer) {
         if (isProducersExceeded(producer)) {
             log.warn("[{}] Attempting to add producer to topic which reached max producers limit", topic);
-            throw new BrokerServiceException.ProducerBusyException("Topic reached max producers limit");
+            return CompletableFuture.failedFuture(
+                    new BrokerServiceException.ProducerBusyException("Topic reached max producers limit"));
         }
 
         if (isSameAddressProducersExceeded(producer)) {
             log.warn("[{}] Attempting to add producer to topic which reached max same address producers limit", topic);
-            throw new BrokerServiceException.ProducerBusyException("Topic reached max same address producers limit");
+            return CompletableFuture.failedFuture(
+                    new BrokerServiceException.ProducerBusyException("Topic reached max same address producers limit"));
         }
 
         if (log.isDebugEnabled()) {
@@ -973,25 +976,46 @@ public abstract class AbstractTopic implements Topic, TopicPolicyListener<TopicP
 
         Producer existProducer = producers.putIfAbsent(producer.getProducerName(), producer);
         if (existProducer != null) {
-            tryOverwriteOldProducer(existProducer, producer);
+            return tryOverwriteOldProducer(existProducer, producer);
+        } else if (!producer.isRemote()) {
+            USER_CREATED_PRODUCER_COUNTER_UPDATER.incrementAndGet(this);
         }
+        return CompletableFuture.completedFuture(null);
     }
 
-    private void tryOverwriteOldProducer(Producer oldProducer, Producer newProducer)
-            throws BrokerServiceException {
-        if (newProducer.isSuccessorTo(oldProducer) && !isUserProvidedProducerName(oldProducer)
-                && !isUserProvidedProducerName(newProducer)) {
+    private CompletableFuture<Void> tryOverwriteOldProducer(Producer oldProducer, Producer newProducer) {
+        if (newProducer.isSuccessorTo(oldProducer)) {
             oldProducer.close(false);
             if (!producers.replace(newProducer.getProducerName(), oldProducer, newProducer)) {
                 // Met concurrent update, throw exception here so that client can try reconnect later.
-                throw new BrokerServiceException.NamingException("Producer with name '" + newProducer.getProducerName()
-                        + "' replace concurrency error");
+                return CompletableFuture.failedFuture(new BrokerServiceException.NamingException("Producer with name '"
+                        + newProducer.getProducerName() + "' replace concurrency error"));
             } else {
                 handleProducerRemoved(oldProducer);
+                return CompletableFuture.completedFuture(null);
             }
         } else {
-            throw new BrokerServiceException.NamingException(
-                    "Producer with name '" + newProducer.getProducerName() + "' is already connected to topic");
+            // If a producer with the same name tries to use a new connection, async check the old connection is
+            // available. The producers related the connection that not available are automatically cleaned up.
+            if (!Objects.equals(oldProducer.getCnx(), newProducer.getCnx())) {
+                return oldProducer.getCnx().checkConnectionLiveness().thenCompose(previousIsActive -> {
+                    if (previousIsActive) {
+                        return CompletableFuture.failedFuture(new BrokerServiceException.NamingException(
+                                "Producer with name '" + newProducer.getProducerName()
+                                        + "' is already connected to topic"));
+                    } else {
+                        // If the connection of the previous producer is not active, the method
+                        // "cnx().checkConnectionLiveness()" will trigger the close for it and kick off the previous
+                        // producer. So try to add current producer again.
+                        // The recursive call will be stopped by these two case(This prevents infinite call):
+                        //   1. add current producer success.
+                        //   2. once another same name producer registered.
+                        return internalAddProducer(newProducer);
+                    }
+                });
+            }
+            return CompletableFuture.failedFuture(new BrokerServiceException.NamingException(
+                    "Producer with name '" + newProducer.getProducerName() + "' is already connected to topic"));
         }
     }
 
@@ -1006,6 +1030,9 @@ public abstract class AbstractTopic implements Topic, TopicPolicyListener<TopicP
         checkArgument(producer.getTopic() == this);
 
         if (producers.remove(producer.getProducerName(), producer)) {
+            if (!producer.isRemote()) {
+                USER_CREATED_PRODUCER_COUNTER_UPDATER.decrementAndGet(this);
+            }
             handleProducerRemoved(producer);
         }
     }
@@ -1110,6 +1137,12 @@ public abstract class AbstractTopic implements Topic, TopicPolicyListener<TopicP
         return brokerService.getBrokerPublishRateLimiter();
     }
 
+    /**
+     * @deprecated Avoid using the deprecated method
+     * #{@link org.apache.pulsar.broker.resources.NamespaceResources#getPoliciesIfCached(NamespaceName)} and we can use
+     * #{@link AbstractTopic#updateResourceGroupLimiter(Policies)} to instead of it.
+     */
+    @Deprecated
     public void updateResourceGroupLimiter(Optional<Policies> optPolicies) {
         Policies policies;
         try {
@@ -1123,17 +1156,20 @@ public abstract class AbstractTopic implements Topic, TopicPolicyListener<TopicP
             log.warn("[{}] Error getting policies {} and publish throttling will be disabled", topic, e.getMessage());
             policies = new Policies();
         }
+        updateResourceGroupLimiter(policies);
+    }
 
+    public void updateResourceGroupLimiter(@Nonnull Policies namespacePolicies) {
+        requireNonNull(namespacePolicies);
         // attach the resource-group level rate limiters, if set
-        String rgName = policies.resource_group_name;
+        String rgName = namespacePolicies.resource_group_name;
         if (rgName != null) {
             final ResourceGroup resourceGroup =
-              brokerService.getPulsar().getResourceGroupServiceManager().resourceGroupGet(rgName);
+                    brokerService.getPulsar().getResourceGroupServiceManager().resourceGroupGet(rgName);
             if (resourceGroup != null) {
                 this.resourceGroupRateLimitingEnabled = true;
                 this.resourceGroupPublishLimiter = resourceGroup.getResourceGroupPublishLimiter();
-                this.resourceGroupPublishLimiter.registerRateLimitFunction(this.getName(),
-                  () -> this.enableCnxAutoRead());
+                this.resourceGroupPublishLimiter.registerRateLimitFunction(this.getName(), this::enableCnxAutoRead);
                 log.info("Using resource group {} rate limiter for topic {}", rgName, topic);
                 return;
             }
@@ -1238,7 +1274,7 @@ public abstract class AbstractTopic implements Topic, TopicPolicyListener<TopicP
                     || this.topicPublishRateLimiter == PublishRateLimiter.DISABLED_RATE_LIMITER) {
                     // create new rateLimiter if rate-limiter is disabled
                     if (preciseTopicPublishRateLimitingEnable) {
-                        this.topicPublishRateLimiter = new PrecisPublishLimiter(publishRate,
+                        this.topicPublishRateLimiter = new PrecisePublishLimiter(publishRate,
                             () -> this.enableCnxAutoRead(), brokerService.pulsar().getExecutor());
                     } else {
                         this.topicPublishRateLimiter = new PublishRateLimiterImpl(publishRate);

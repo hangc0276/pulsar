@@ -154,6 +154,7 @@ public class BrokerBookieIsolationTest {
         config.setBrokerServicePort(Optional.of(0));
         config.setAdvertisedAddress("localhost");
         config.setBookkeeperClientIsolationGroups(brokerBookkeeperClientIsolationGroups);
+        config.setDefaultNumberOfNamespaceBundles(8);
 
         config.setManagedLedgerDefaultEnsembleSize(2);
         config.setManagedLedgerDefaultWriteQuorum(2);
@@ -204,6 +205,9 @@ public class BrokerBookieIsolationTest {
                 BookieAffinityGroupData.builder()
                         .bookkeeperAffinityGroupPrimary(tenantNamespaceIsolationGroups)
                         .build());
+
+        //Checks the namespace bundles after setting the bookie affinity
+        assertEquals(admin.namespaces().getBundles(ns2).getNumBundles(), config.getDefaultNumberOfNamespaceBundles());
 
         try {
             admin.namespaces().getBookieAffinityGroup(ns1);
@@ -298,6 +302,7 @@ public class BrokerBookieIsolationTest {
                 bookies[3].getBookieId());
 
         ServiceConfiguration config = new ServiceConfiguration();
+        config.setTopicLevelPoliciesEnabled(false);
         config.setLoadManagerClassName(ModularLoadManagerImpl.class.getName());
         config.setClusterName(cluster);
         config.setWebServicePort(Optional.of(0));
@@ -606,9 +611,9 @@ public class BrokerBookieIsolationTest {
         config.setBrokerShutdownTimeoutMs(0L);
         config.setLoadBalancerOverrideBrokerNicSpeedGbps(Optional.of(1.0d));
         config.setBrokerServicePort(Optional.of(0));
+        config.setTopicLevelPoliciesEnabled(false);
         config.setAdvertisedAddress("localhost");
         config.setBookkeeperClientIsolationGroups(brokerBookkeeperClientIsolationGroups);
-
         config.setManagedLedgerDefaultEnsembleSize(2);
         config.setManagedLedgerDefaultWriteQuorum(2);
         config.setManagedLedgerDefaultAckQuorum(2);

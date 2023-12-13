@@ -34,11 +34,14 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Matcher;
@@ -87,6 +90,7 @@ import org.apache.pulsar.common.policies.data.BrokerAssignment;
 import org.apache.pulsar.common.policies.data.ClusterDataImpl;
 import org.apache.pulsar.common.policies.data.LocalPolicies;
 import org.apache.pulsar.common.policies.data.NamespaceOwnershipStatus;
+import org.apache.pulsar.common.policies.data.Policies;
 import org.apache.pulsar.common.policies.impl.NamespaceIsolationPolicies;
 import org.apache.pulsar.common.util.FutureUtil;
 import org.apache.pulsar.common.util.collections.ConcurrentOpenHashMap;
@@ -865,11 +869,12 @@ public class NamespaceService implements AutoCloseable {
                                     for (NamespaceBundle sBundle : splittedBundles.getRight()) {
                                         checkNotNull(ownershipCache.tryAcquiringOwnership(sBundle));
                                     }
-                                    updateNamespaceBundles(nsname, splittedBundles.getLeft())
-                                            .thenRun(() -> {
-                                                bundleFactory.invalidateBundleCache(bundle.getNamespaceObject());
-                                                updateFuture.complete(splittedBundles.getRight());
-                                            }).exceptionally(ex1 -> {
+                                    updateNamespaceBundles(nsname, splittedBundles.getLeft()).thenCompose(__ -> {
+                                        return updateNamespaceBundlesForPolicies(nsname, splittedBundles.getLeft());
+                                    }).thenRun(() -> {
+                                        bundleFactory.invalidateBundleCache(bundle.getNamespaceObject());
+                                        updateFuture.complete(splittedBundles.getRight());
+                                    }).exceptionally(ex1 -> {
                                         String msg = format("failed to update namespace policies [%s], "
                                                         + "NamespaceBundle: %s due to %s",
                                                 nsname.toString(), bundle.getBundleRange(), ex1.getMessage());
@@ -945,6 +950,35 @@ public class NamespaceService implements AutoCloseable {
     }
 
     /**
+     * Update new bundle-range to admin/policies/namespace.
+     * Update may fail because of concurrent write to Zookeeper.
+     *
+     * @param nsname
+     * @param nsBundles
+     * @throws Exception
+     */
+    private CompletableFuture<Void> updateNamespaceBundlesForPolicies(NamespaceName nsname,
+                                                                      NamespaceBundles nsBundles) {
+        Objects.requireNonNull(nsname);
+        Objects.requireNonNull(nsBundles);
+
+        return pulsar.getPulsarResources().getNamespaceResources().getPoliciesAsync(nsname).thenCompose(policies -> {
+            if (policies.isPresent()) {
+                return pulsar.getPulsarResources().getNamespaceResources().setPoliciesAsync(nsname, oldPolicies -> {
+                    oldPolicies.bundles = nsBundles.getBundlesData();
+                    return oldPolicies;
+                });
+            } else {
+                LOG.error("Policies of namespace {} is not exist!", nsname);
+                Policies newPolicies = new Policies();
+                newPolicies.bundles = nsBundles.getBundlesData();
+                return pulsar.getPulsarResources().getNamespaceResources().createPoliciesAsync(nsname, newPolicies);
+            }
+        });
+    }
+
+
+    /**
      * Update new bundle-range to LocalZk (create a new node if not present).
      * Update may fail because of concurrent write to Zookeeper.
      *
@@ -1009,26 +1043,28 @@ public class NamespaceService implements AutoCloseable {
                 new IllegalArgumentException("Invalid class of NamespaceBundle: " + suName.getClass().getName()));
     }
 
+    /**
+     * @Deprecated This method is only used in test now.
+     */
+    @Deprecated
     public boolean isServiceUnitActive(TopicName topicName) {
         try {
-            OwnedBundle ownedBundle = ownershipCache.getOwnedBundle(getBundle(topicName));
-            if (ownedBundle == null) {
-                return false;
-            }
-            return ownedBundle.isActive();
-        } catch (Exception e) {
-            LOG.warn("Unable to find OwnedBundle for topic - [{}]", topicName, e);
-            return false;
+            return isServiceUnitActiveAsync(topicName).get(pulsar.getConfig()
+                    .getMetadataStoreOperationTimeoutSeconds(), SECONDS);
+        } catch (InterruptedException | ExecutionException | TimeoutException e) {
+            LOG.warn("Unable to find OwnedBundle for topic in time - [{}]", topicName, e);
+            throw new RuntimeException(e);
         }
     }
 
     public CompletableFuture<Boolean> isServiceUnitActiveAsync(TopicName topicName) {
-        Optional<CompletableFuture<OwnedBundle>> res = ownershipCache.getOwnedBundleAsync(getBundle(topicName));
-        if (!res.isPresent()) {
-            return CompletableFuture.completedFuture(false);
-        }
-
-        return res.get().thenApply(ob -> ob != null && ob.isActive());
+        return getBundleAsync(topicName).thenCompose(bundle -> {
+            Optional<CompletableFuture<OwnedBundle>> optionalFuture = ownershipCache.getOwnedBundleAsync(bundle);
+            if (!optionalFuture.isPresent()) {
+                return CompletableFuture.completedFuture(false);
+            }
+            return optionalFuture.get().thenApply(ob -> ob != null && ob.isActive());
+        });
     }
 
     private boolean isNamespaceOwned(NamespaceName fqnn) throws Exception {
@@ -1400,6 +1436,17 @@ public class NamespaceService implements AutoCloseable {
     public static boolean isSystemServiceNamespace(String namespace) {
         return SYSTEM_NAMESPACE.toString().equals(namespace)
                 || SLA_NAMESPACE_PATTERN.matcher(namespace).matches()
+                || HEARTBEAT_NAMESPACE_PATTERN.matcher(namespace).matches()
+                || HEARTBEAT_NAMESPACE_PATTERN_V2.matcher(namespace).matches();
+    }
+
+    /**
+     * used for filtering bundles in special namespace.
+     * @param namespace
+     * @return True if namespace is HEARTBEAT_NAMESPACE or SLA_NAMESPACE
+     */
+    public static boolean filterNamespaceForShedding(String namespace) {
+        return SLA_NAMESPACE_PATTERN.matcher(namespace).matches()
                 || HEARTBEAT_NAMESPACE_PATTERN.matcher(namespace).matches()
                 || HEARTBEAT_NAMESPACE_PATTERN_V2.matcher(namespace).matches();
     }

@@ -50,6 +50,7 @@ public class NamespaceResources extends BaseResources<Policies> {
     private final IsolationPolicyResources isolationPolicies;
     private final PartitionedTopicResources partitionedTopicResources;
     private final MetadataStore configurationStore;
+    private final MetadataStore localStore;
 
     private final MetadataCache<LocalPolicies> localPoliciesCache;
 
@@ -60,6 +61,7 @@ public class NamespaceResources extends BaseResources<Policies> {
     public NamespaceResources(MetadataStore localStore, MetadataStore configurationStore, int operationTimeoutSec) {
         super(configurationStore, Policies.class, operationTimeoutSec);
         this.configurationStore = configurationStore;
+        this.localStore = localStore;
         isolationPolicies = new IsolationPolicyResources(configurationStore, operationTimeoutSec);
         partitionedTopicResources = new PartitionedTopicResources(configurationStore, operationTimeoutSec);
 
@@ -126,6 +128,13 @@ public class NamespaceResources extends BaseResources<Policies> {
         return get(joinPath(BASE_POLICIES_PATH, ns.toString()));
     }
 
+    /**
+     * Get the namespace policy from the metadata cache. This method will not trigger the load of metadata cache.
+     *
+     * @deprecated Since this method may introduce inconsistent namespace policies. we should use
+     * #{@link NamespaceResources#getPoliciesAsync}
+     */
+    @Deprecated
     public Optional<Policies> getPoliciesIfCached(NamespaceName ns) {
         return getCache().getIfCached(joinPath(BASE_POLICIES_PATH, ns.toString()));
     }
@@ -267,8 +276,18 @@ public class NamespaceResources extends BaseResources<Policies> {
         }
 
         public CompletableFuture<Optional<PartitionedTopicMetadata>> getPartitionedTopicMetadataAsync(TopicName tn) {
-            return getAsync(joinPath(PARTITIONED_TOPIC_PATH, tn.getNamespace(), tn.getDomain().value(),
-                    tn.getEncodedLocalName()));
+            return getPartitionedTopicMetadataAsync(tn, false);
+        }
+
+        public CompletableFuture<Optional<PartitionedTopicMetadata>> getPartitionedTopicMetadataAsync(TopicName tn,
+                                                                                                      boolean refresh) {
+            if (refresh) {
+                return refreshAndGetAsync(joinPath(PARTITIONED_TOPIC_PATH, tn.getNamespace(), tn.getDomain().value(),
+                        tn.getEncodedLocalName()));
+            } else {
+                return getAsync(joinPath(PARTITIONED_TOPIC_PATH, tn.getNamespace(), tn.getDomain().value(),
+                        tn.getEncodedLocalName()));
+            }
         }
 
         public boolean partitionedTopicExists(TopicName tn) throws MetadataStoreException {
@@ -300,13 +319,13 @@ public class NamespaceResources extends BaseResources<Policies> {
     // clear resource of `/loadbalance/bundle-data/{tenant}/{namespace}/` in metadata-store
     public CompletableFuture<Void> deleteBundleDataAsync(NamespaceName ns) {
         final String namespaceBundlePath = joinPath(BUNDLE_DATA_BASE_PATH, ns.toString());
-        return getStore().deleteRecursive(namespaceBundlePath);
+        return getLocalStore().deleteRecursive(namespaceBundlePath);
     }
 
     // clear resource of `/loadbalance/bundle-data/{tenant}/` in metadata-store
     public CompletableFuture<Void> deleteBundleDataTenantAsync(String tenant) {
         final String tenantBundlePath = joinPath(BUNDLE_DATA_BASE_PATH, tenant);
-        return getStore().deleteRecursive(tenantBundlePath);
+        return getLocalStore().deleteRecursive(tenantBundlePath);
     }
 
 }

@@ -110,11 +110,11 @@ public class PersistentReplicator extends AbstractReplicator
     public PersistentReplicator(PersistentTopic topic, ManagedCursor cursor, String localCluster, String remoteCluster,
                                 BrokerService brokerService, PulsarClientImpl replicationClient)
             throws PulsarServerException {
-        super(topic.getName(), topic.getReplicatorPrefix(), localCluster, remoteCluster, brokerService,
+        super(topic, topic.getReplicatorPrefix(), localCluster, remoteCluster, brokerService,
                 replicationClient);
         this.topic = topic;
         this.cursor = cursor;
-        this.expiryMonitor = new PersistentMessageExpiryMonitor(topicName,
+        this.expiryMonitor = new PersistentMessageExpiryMonitor(topic.getName(),
                 Codec.decode(cursor.getName()), cursor, null);
         HAVE_PENDING_READ_UPDATER.set(this, FALSE);
         PENDING_MESSAGES_UPDATER.set(this, 0);
@@ -653,6 +653,12 @@ public class PersistentReplicator extends AbstractReplicator
             public void readEntryComplete(Entry entry, Object ctx) {
                 future.complete(entry);
             }
+
+            @Override
+            public String toString() {
+                return String.format("Replication [{}] peek Nth message",
+                        PersistentReplicator.this.producer.getProducerName());
+            }
         }, null);
 
         return future;
@@ -669,6 +675,14 @@ public class PersistentReplicator extends AbstractReplicator
     public void deleteFailed(ManagedLedgerException exception, Object ctx) {
         log.error("[{}][{} -> {}] Failed to delete message at {}: {}", topicName, localCluster, remoteCluster, ctx,
                 exception.getMessage(), exception);
+        if (exception instanceof CursorAlreadyClosedException) {
+            log.error("[{}][{} -> {}] Asynchronous ack failure because replicator is already deleted and cursor is"
+                            + " already closed {}, ({})", topic, localCluster, remoteCluster, ctx,
+                    exception.getMessage(), exception);
+            // replicator is already deleted and cursor is already closed so, producer should also be stopped
+            closeProducerAsync();
+            return;
+        }
         if (ctx instanceof PositionImpl) {
             PositionImpl deletedEntry = (PositionImpl) ctx;
             if (deletedEntry.compareTo((PositionImpl) cursor.getMarkDeletedPosition()) > 0) {

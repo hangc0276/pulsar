@@ -27,6 +27,7 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.NavigableSet;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
@@ -93,7 +94,7 @@ public class PersistentDispatcherMultipleConsumers extends AbstractDispatcherMul
     protected volatile PositionImpl minReplayedPosition = null;
     protected boolean shouldRewindBeforeReadingOrReplaying = false;
     protected final String name;
-    protected boolean sendInProgress;
+    private boolean sendInProgress = false;
     protected static final AtomicIntegerFieldUpdater<PersistentDispatcherMultipleConsumers>
             TOTAL_AVAILABLE_PERMITS_UPDATER =
             AtomicIntegerFieldUpdater.newUpdater(PersistentDispatcherMultipleConsumers.class,
@@ -256,7 +257,7 @@ public class PersistentDispatcherMultipleConsumers extends AbstractDispatcherMul
     }
 
     public synchronized void readMoreEntries() {
-        if (sendInProgress) {
+        if (isSendInProgress()) {
             // we cannot read more entries while sending the previous batch
             // otherwise we could re-read the same entries and send duplicates
             return;
@@ -278,7 +279,7 @@ public class PersistentDispatcherMultipleConsumers extends AbstractDispatcherMul
                 return;
             }
 
-            Set<PositionImpl> messagesToReplayNow = getMessagesToReplayNow(messagesToRead);
+            NavigableSet<PositionImpl> messagesToReplayNow = getMessagesToReplayNow(messagesToRead);
 
             if (!messagesToReplayNow.isEmpty()) {
                 if (log.isDebugEnabled()) {
@@ -287,7 +288,7 @@ public class PersistentDispatcherMultipleConsumers extends AbstractDispatcherMul
                 }
 
                 havePendingReplayRead = true;
-                minReplayedPosition = messagesToReplayNow.stream().min(PositionImpl::compareTo).orElse(null);
+                minReplayedPosition = messagesToReplayNow.first();
                 Set<? extends Position> deletedMessages = topic.isDelayedDeliveryEnabled()
                         ? asyncReplayEntriesInOrder(messagesToReplayNow) : asyncReplayEntries(messagesToReplayNow);
                 // clear already acked positions from replay bucket
@@ -311,11 +312,14 @@ public class PersistentDispatcherMultipleConsumers extends AbstractDispatcherMul
                             consumerList.size());
                 }
                 havePendingRead = true;
-                Set<PositionImpl> toReplay = getMessagesToReplayNow(1);
-                minReplayedPosition = toReplay.stream().findFirst().orElse(null);
-                if (minReplayedPosition != null) {
+                NavigableSet<PositionImpl> toReplay = getMessagesToReplayNow(1);
+                if (!toReplay.isEmpty()) {
+                    minReplayedPosition = toReplay.first();
                     redeliveryMessages.add(minReplayedPosition.getLedgerId(), minReplayedPosition.getEntryId());
+                } else {
+                    minReplayedPosition = null;
                 }
+
                 cursor.asyncReadEntriesOrWait(messagesToRead, bytesToRead, this,
                         ReadType.Normal, topic.getMaxReadPosition());
             } else {
@@ -556,9 +560,9 @@ public class PersistentDispatcherMultipleConsumers extends AbstractDispatcherMul
         if (serviceConfig.isDispatcherDispatchMessagesInSubscriptionThread()) {
             // setting sendInProgress here, because sendMessagesToConsumers will be executed
             // in a separate thread, and we want to prevent more reads
-            sendInProgress = true;
+            acquireSendInProgress();
             dispatchMessagesThread.execute(safeRun(() -> {
-                if (sendMessagesToConsumers(readType, entries)) {
+                if (sendMessagesToConsumers(readType, entries, false)) {
                     updatePendingBytesToDispatch(-size);
                     readMoreEntries();
                 } else {
@@ -566,7 +570,7 @@ public class PersistentDispatcherMultipleConsumers extends AbstractDispatcherMul
                 }
             }));
         } else {
-            if (sendMessagesToConsumers(readType, entries)) {
+            if (sendMessagesToConsumers(readType, entries, true)) {
                 updatePendingBytesToDispatch(-size);
                 readMoreEntriesAsync();
             } else {
@@ -575,12 +579,27 @@ public class PersistentDispatcherMultipleConsumers extends AbstractDispatcherMul
         }
     }
 
-    protected final synchronized boolean sendMessagesToConsumers(ReadType readType, List<Entry> entries) {
+    protected synchronized void acquireSendInProgress() {
         sendInProgress = true;
+    }
+
+    protected synchronized void releaseSendInProgress() {
+        sendInProgress = false;
+    }
+
+    protected synchronized boolean isSendInProgress() {
+        return sendInProgress;
+    }
+
+    protected final synchronized boolean sendMessagesToConsumers(ReadType readType, List<Entry> entries,
+                                                                 boolean needAcquireSendInProgress) {
+        if (needAcquireSendInProgress) {
+            acquireSendInProgress();
+        }
         try {
             return trySendMessagesToConsumers(readType, entries);
         } finally {
-            sendInProgress = false;
+            releaseSendInProgress();
         }
     }
 
@@ -1043,17 +1062,18 @@ public class PersistentDispatcherMultipleConsumers extends AbstractDispatcherMul
         }
     }
 
-    protected synchronized Set<PositionImpl> getMessagesToReplayNow(int maxMessagesToRead) {
-        if (!redeliveryMessages.isEmpty()) {
-            return redeliveryMessages.getMessagesToReplayNow(maxMessagesToRead);
-        } else if (delayedDeliveryTracker.isPresent() && delayedDeliveryTracker.get().hasMessageAvailable()) {
+    protected synchronized NavigableSet<PositionImpl> getMessagesToReplayNow(int maxMessagesToRead) {
+        if (delayedDeliveryTracker.isPresent() && delayedDeliveryTracker.get().hasMessageAvailable()) {
             delayedDeliveryTracker.get().resetTickTime(topic.getDelayedDeliveryTickTimeMillis());
-            Set<PositionImpl> messagesAvailableNow =
+            NavigableSet<PositionImpl> messagesAvailableNow =
                     delayedDeliveryTracker.get().getScheduledMessages(maxMessagesToRead);
             messagesAvailableNow.forEach(p -> redeliveryMessages.add(p.getLedgerId(), p.getEntryId()));
-            return messagesAvailableNow;
+        }
+
+        if (!redeliveryMessages.isEmpty()) {
+            return redeliveryMessages.getMessagesToReplayNow(maxMessagesToRead);
         } else {
-            return Collections.emptySet();
+            return Collections.emptyNavigableSet();
         }
     }
 

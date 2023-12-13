@@ -16,10 +16,12 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-package org.apache.pulsar.broker.loadbalance;
+package org.apache.pulsar.broker.loadbalance.impl;
 
 import static org.apache.pulsar.broker.loadbalance.impl.ModularLoadManagerImpl.TIME_AVERAGE_BROKER_ZPATH;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -40,7 +42,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
@@ -52,24 +56,30 @@ import lombok.extern.slf4j.Slf4j;
 import org.apache.pulsar.broker.PulsarServerException;
 import org.apache.pulsar.broker.PulsarService;
 import org.apache.pulsar.broker.ServiceConfiguration;
-import org.apache.pulsar.broker.loadbalance.impl.LoadManagerShared;
+import org.apache.pulsar.broker.loadbalance.LoadBalancerTestingUtils;
+import org.apache.pulsar.broker.loadbalance.LoadData;
+import org.apache.pulsar.broker.loadbalance.LoadManager;
 import org.apache.pulsar.broker.loadbalance.impl.LoadManagerShared.BrokerTopicLoadingPredicate;
-import org.apache.pulsar.broker.loadbalance.impl.ModularLoadManagerImpl;
-import org.apache.pulsar.broker.loadbalance.impl.ModularLoadManagerWrapper;
-import org.apache.pulsar.broker.loadbalance.impl.SimpleResourceAllocationPolicies;
 import org.apache.pulsar.client.admin.Namespaces;
 import org.apache.pulsar.client.admin.PulsarAdmin;
+import org.apache.pulsar.client.admin.PulsarAdminException;
 import org.apache.pulsar.client.api.Producer;
 import org.apache.pulsar.client.api.PulsarClient;
+import org.apache.pulsar.client.api.PulsarClientException;
 import org.apache.pulsar.common.naming.NamespaceBundle;
 import org.apache.pulsar.common.naming.NamespaceBundleFactory;
+import org.apache.pulsar.common.naming.NamespaceBundleSplitAlgorithm;
 import org.apache.pulsar.common.naming.NamespaceBundles;
 import org.apache.pulsar.common.naming.NamespaceName;
 import org.apache.pulsar.common.naming.ServiceUnitId;
+import org.apache.pulsar.common.naming.TopicName;
+import org.apache.pulsar.common.policies.data.BundlesData;
 import org.apache.pulsar.common.policies.data.ClusterData;
 import org.apache.pulsar.common.policies.data.NamespaceIsolationDataImpl;
+import org.apache.pulsar.common.policies.data.ResourceQuota;
 import org.apache.pulsar.common.policies.data.TenantInfoImpl;
 import org.apache.pulsar.common.util.ObjectMapperFactory;
+import org.apache.pulsar.metadata.api.MetadataCache;
 import org.apache.pulsar.metadata.api.Notification;
 import org.apache.pulsar.metadata.api.NotificationType;
 import org.apache.pulsar.metadata.api.extended.CreateOption;
@@ -87,6 +97,7 @@ import org.mockito.Mockito;
 import org.powermock.reflect.Whitebox;
 import org.testng.annotations.AfterMethod;
 import org.testng.annotations.BeforeMethod;
+import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
 @Slf4j
@@ -335,38 +346,70 @@ public class ModularLoadManagerImplTest {
             bundleReference.set(invocation.getArguments()[0].toString() + '/' + invocation.getArguments()[1]);
             return null;
         }).when(namespacesSpy1).unloadNamespaceBundle(Mockito.anyString(), Mockito.anyString());
+
+        AtomicReference<Optional<String>> selectedBrokerRef = new AtomicReference<>();
+        ModularLoadManagerImpl primaryLoadManagerSpy = spy(primaryLoadManager);
+        doAnswer(invocation -> {
+            ServiceUnitId serviceUnitId = (ServiceUnitId) invocation.getArguments()[0];
+            Optional<String> broker = primaryLoadManager.selectBroker(serviceUnitId);
+            selectedBrokerRef.set(broker);
+            return broker;
+        }).when(primaryLoadManagerSpy).selectBroker(any());
+
         setField(pulsar1.getAdminClient(), "namespaces", namespacesSpy1);
         pulsar1.getConfiguration().setLoadBalancerEnabled(true);
-        final LoadData loadData = (LoadData) getField(primaryLoadManager, "loadData");
+        final LoadData loadData = (LoadData) getField(primaryLoadManagerSpy, "loadData");
         final Map<String, BrokerData> brokerDataMap = loadData.getBrokerData();
         final BrokerData brokerDataSpy1 = spy(brokerDataMap.get(primaryHost));
         when(brokerDataSpy1.getLocalData()).thenReturn(localBrokerData);
         brokerDataMap.put(primaryHost, brokerDataSpy1);
         // Need to update all the bundle data for the shredder to see the spy.
-        primaryLoadManager.handleDataNotification(new Notification(NotificationType.Created, LoadManager.LOADBALANCE_BROKERS_ROOT + "/broker:8080"));
+        primaryLoadManagerSpy.handleDataNotification(new Notification(NotificationType.Created, LoadManager.LOADBALANCE_BROKERS_ROOT + "/broker:8080"));
 
         Thread.sleep(100);
         localBrokerData.setCpu(new ResourceUsage(80, 100));
-        primaryLoadManager.doLoadShedding();
+        primaryLoadManagerSpy.doLoadShedding();
 
         // 80% is below overload threshold: verify nothing is unloaded.
-        verify(namespacesSpy1, Mockito.times(0)).unloadNamespaceBundle(Mockito.anyString(), Mockito.anyString());
+        verify(namespacesSpy1, Mockito.times(0))
+                .unloadNamespaceBundle(Mockito.anyString(), Mockito.anyString());
 
         localBrokerData.setCpu(new ResourceUsage(90, 100));
-        primaryLoadManager.doLoadShedding();
+        primaryLoadManagerSpy.doLoadShedding();
         // Most expensive bundle will be unloaded.
-        verify(namespacesSpy1, Mockito.times(1)).unloadNamespaceBundle(Mockito.anyString(), Mockito.anyString());
+        verify(namespacesSpy1, Mockito.times(1))
+                .unloadNamespaceBundle(Mockito.anyString(), Mockito.anyString());
         assertEquals(bundleReference.get(), mockBundleName(2));
+        assertEquals(selectedBrokerRef.get().get(), secondaryHost);
 
-        primaryLoadManager.doLoadShedding();
+        primaryLoadManagerSpy.doLoadShedding();
         // Now less expensive bundle will be unloaded (normally other bundle would move off and nothing would be
         // unloaded, but this is not the case due to the spy's behavior).
-        verify(namespacesSpy1, Mockito.times(2)).unloadNamespaceBundle(Mockito.anyString(), Mockito.anyString());
+        verify(namespacesSpy1, Mockito.times(2))
+                .unloadNamespaceBundle(Mockito.anyString(), Mockito.anyString());
         assertEquals(bundleReference.get(), mockBundleName(1));
+        assertEquals(selectedBrokerRef.get().get(), secondaryHost);
 
-        primaryLoadManager.doLoadShedding();
+        primaryLoadManagerSpy.doLoadShedding();
         // Now both are in grace period: neither should be unloaded.
-        verify(namespacesSpy1, Mockito.times(2)).unloadNamespaceBundle(Mockito.anyString(), Mockito.anyString());
+        verify(namespacesSpy1, Mockito.times(2))
+                .unloadNamespaceBundle(Mockito.anyString(), Mockito.anyString());
+        assertEquals(selectedBrokerRef.get().get(), secondaryHost);
+
+        // Test bundle transfer to same broker
+
+        loadData.getRecentlyUnloadedBundles().clear();
+        primaryLoadManagerSpy.doLoadShedding();
+        verify(namespacesSpy1, Mockito.times(3))
+                .unloadNamespaceBundle(Mockito.anyString(), Mockito.anyString());
+
+        doReturn(Optional.of(primaryHost)).when(primaryLoadManagerSpy).selectBroker(any());
+        loadData.getRecentlyUnloadedBundles().clear();
+        primaryLoadManagerSpy.doLoadShedding();
+        // The bundle shouldn't be unloaded because the broker is the same.
+        verify(namespacesSpy1, Mockito.times(3))
+                .unloadNamespaceBundle(Mockito.anyString(), Mockito.anyString());
+
     }
 
     // Test that ModularLoadManagerImpl will determine that writing local data to ZooKeeper is necessary if certain
@@ -686,4 +729,165 @@ public class ModularLoadManagerImplTest {
 
 
     }
+
+    @DataProvider(name = "isV1")
+    public Object[][] isV1() {
+        return new Object[][] {{true}, {false}};
+    }
+
+    @Test(dataProvider = "isV1")
+    public void testBundleDataDefaultValue(boolean isV1) throws Exception {
+        final String cluster = "use";
+        final String tenant = "my-tenant";
+        final String namespace = "my-ns";
+        NamespaceName ns = isV1 ? NamespaceName.get(tenant, cluster, namespace) : NamespaceName.get(tenant, namespace);
+        admin1.clusters().createCluster(cluster, ClusterData.builder().serviceUrl("http://" + pulsar1.getAdvertisedAddress()).build());
+        admin1.tenants().createTenant(tenant,
+                new TenantInfoImpl(Sets.newHashSet("appid1", "appid2"), Sets.newHashSet(cluster)));
+        admin1.namespaces().createNamespace(ns.toString(), 16);
+
+        // set resourceQuota to the first bundle range.
+        BundlesData bundlesData = admin1.namespaces().getBundles(ns.toString());
+        NamespaceBundle namespaceBundle = nsFactory.getBundle(ns,
+                Range.range(Long.decode(bundlesData.getBoundaries().get(0)), BoundType.CLOSED, Long.decode(bundlesData.getBoundaries().get(1)),
+                        BoundType.OPEN));
+        ResourceQuota quota = new ResourceQuota();
+        quota.setMsgRateIn(1024.1);
+        quota.setMsgRateOut(1024.2);
+        quota.setBandwidthIn(1024.3);
+        quota.setBandwidthOut(1024.4);
+        quota.setMemory(1024.0);
+        admin1.resourceQuotas().setNamespaceBundleResourceQuota(ns.toString(), namespaceBundle.getBundleRange(), quota);
+
+        ModularLoadManagerWrapper loadManagerWrapper = (ModularLoadManagerWrapper) pulsar1.getLoadManager().get();
+        ModularLoadManagerImpl lm = (ModularLoadManagerImpl) loadManagerWrapper.getLoadManager();
+
+        // get the bundleData of the first bundle range.
+        // The default value of the bundleData be the same as resourceQuota because the resourceQuota is present.
+        BundleData defaultBundleData = lm.getBundleDataOrDefault(namespaceBundle.toString());
+
+        TimeAverageMessageData shortTermData = defaultBundleData.getShortTermData();
+        TimeAverageMessageData longTermData = defaultBundleData.getLongTermData();
+        assertEquals(shortTermData.getMsgRateIn(), 1024.1);
+        assertEquals(shortTermData.getMsgRateOut(), 1024.2);
+        assertEquals(shortTermData.getMsgThroughputIn(), 1024.3);
+        assertEquals(shortTermData.getMsgThroughputOut(), 1024.4);
+
+        assertEquals(longTermData.getMsgRateIn(), 1024.1);
+        assertEquals(longTermData.getMsgRateOut(), 1024.2);
+        assertEquals(longTermData.getMsgThroughputIn(), 1024.3);
+        assertEquals(longTermData.getMsgThroughputOut(), 1024.4);
+    }
+
+
+    @Test
+    public void testRemoveNonExistBundleData()
+            throws PulsarAdminException, InterruptedException,
+            PulsarClientException, PulsarServerException, NoSuchFieldException, IllegalAccessException {
+        final String cluster = "use";
+        final String tenant = "my-tenant";
+        final String namespace = "remove-non-exist-bundle-data-ns";
+        final String topicName = tenant + "/" + namespace + "/" + "topic";
+        int bundleNumbers = 8;
+
+        admin1.clusters().createCluster(cluster, ClusterData.builder().serviceUrl("http://" + pulsar1.getAdvertisedAddress()).build());
+        admin1.tenants().createTenant(tenant,
+                new TenantInfoImpl(Sets.newHashSet("appid1", "appid2"), Sets.newHashSet(cluster)));
+        admin1.namespaces().createNamespace(tenant + "/" + namespace, bundleNumbers);
+
+        @Cleanup
+        PulsarClient pulsarClient = PulsarClient.builder().serviceUrl(pulsar1.getBrokerServiceUrl()).build();
+
+        // create a lot of topic to fully distributed among bundles.
+        for (int i = 0; i < 10; i++) {
+            String topicNameI = topicName + i;
+            admin1.topics().createPartitionedTopic(topicNameI, 20);
+            // trigger bundle assignment
+
+            pulsarClient.newConsumer().topic(topicNameI)
+                    .subscriptionName("my-subscriber-name2").subscribe();
+        }
+
+        ModularLoadManagerWrapper loadManagerWrapper = (ModularLoadManagerWrapper) pulsar1.getLoadManager().get();
+        ModularLoadManagerImpl lm1 = (ModularLoadManagerImpl) loadManagerWrapper.getLoadManager();
+        ModularLoadManagerWrapper loadManager2 = (ModularLoadManagerWrapper) pulsar2.getLoadManager().get();
+        ModularLoadManagerImpl lm2 = (ModularLoadManagerImpl) loadManager2.getLoadManager();
+
+        Field executors = lm1.getClass().getDeclaredField("executors");
+        executors.setAccessible(true);
+        ExecutorService executorService = (ExecutorService) executors.get(lm1);
+
+        assertEquals(lm1.getAvailableBrokers().size(), 2);
+
+        pulsar1.getBrokerService().updateRates();
+        pulsar2.getBrokerService().updateRates();
+
+        lm1.writeBrokerDataOnZooKeeper(true);
+        lm2.writeBrokerDataOnZooKeeper(true);
+
+        // wait for metadata store notification finish
+        CountDownLatch latch = new CountDownLatch(1);
+        executorService.submit(latch::countDown);
+        latch.await();
+
+        loadManagerWrapper.writeResourceQuotasToZooKeeper();
+
+        MetadataCache<BundleData> bundlesCache = pulsar1.getLocalMetadataStore().getMetadataCache(BundleData.class);
+
+        // trigger bundle split
+        String topicToFindBundle = topicName + 0;
+        NamespaceBundle bundleWillBeSplit = pulsar1.getNamespaceService().getBundle(TopicName.get(topicToFindBundle));
+
+        String bundleDataPath = ModularLoadManagerImpl.BUNDLE_DATA_PATH + "/" + tenant + "/" + namespace;
+        CompletableFuture<List<String>> children = bundlesCache.getChildren(bundleDataPath);
+        List<String> bundles = children.join();
+        assertTrue(bundles.contains(bundleWillBeSplit.getBundleRange()));
+
+        // after updateAll no namespace bundle data is deleted from metadata store.
+        lm1.updateAll();
+
+        children = bundlesCache.getChildren(bundleDataPath);
+        bundles = children.join();
+        assertFalse(bundles.isEmpty());
+        assertEquals(bundleNumbers, bundles.size());
+
+        NamespaceName namespaceName = NamespaceName.get(tenant, namespace);
+        pulsar1.getAdminClient().namespaces().splitNamespaceBundle(tenant + "/" + namespace,
+                bundleWillBeSplit.getBundleRange(),
+                false, NamespaceBundleSplitAlgorithm.RANGE_EQUALLY_DIVIDE_NAME);
+
+        NamespaceBundles allBundlesAfterSplit =
+                pulsar1.getNamespaceService().getNamespaceBundleFactory()
+                        .getBundles(namespaceName);
+
+        assertFalse(allBundlesAfterSplit.getBundles().contains(bundleWillBeSplit));
+
+        // the bundle data should be deleted
+
+        pulsar1.getBrokerService().updateRates();
+        pulsar2.getBrokerService().updateRates();
+
+        lm1.writeBrokerDataOnZooKeeper(true);
+        lm2.writeBrokerDataOnZooKeeper(true);
+
+        latch = new CountDownLatch(1);
+        // wait for metadata store notification finish
+        CountDownLatch finalLatch = latch;
+        executorService.submit(finalLatch::countDown);
+        latch.await();
+
+        loadManagerWrapper.writeResourceQuotasToZooKeeper();
+
+        lm1.updateAll();
+
+        log.info("update all triggered.");
+
+        // check bundle data should be deleted from metadata store.
+
+        CompletableFuture<List<String>> childrenAfterSplit = bundlesCache.getChildren(bundleDataPath);
+        List<String> bundlesAfterSplit = childrenAfterSplit.join();
+
+        assertFalse(bundlesAfterSplit.contains(bundleWillBeSplit.getBundleRange()));
+    }
+
 }

@@ -49,7 +49,6 @@ import org.apache.pulsar.common.util.CmdGenerateDocs;
 import org.apache.pulsar.common.util.DirectMemoryUtils;
 import org.apache.pulsar.proxy.stats.ProxyStats;
 import org.apache.pulsar.websocket.WebSocketConsumerServlet;
-import org.apache.pulsar.websocket.WebSocketPingPongServlet;
 import org.apache.pulsar.websocket.WebSocketProducerServlet;
 import org.apache.pulsar.websocket.WebSocketReaderServlet;
 import org.apache.pulsar.websocket.WebSocketService;
@@ -248,15 +247,21 @@ public class ProxyServiceStarter {
                                      ProxyConfiguration config,
                                      ProxyService service,
                                      BrokerDiscoveryProvider discoveryProvider) throws Exception {
-        if (service != null) {
-            PrometheusMetricsServlet metricsServlet = service.getMetricsServlet();
-            if (metricsServlet != null) {
-                server.addServlet("/metrics", new ServletHolder(metricsServlet),
-                        Collections.emptyList(), config.isAuthenticateMetricsEndpoint());
+        // We can make 'status.html' publicly accessible without authentication since
+        // it does not contain any sensitive data.
+        server.addRestResource("/", VipStatus.ATTRIBUTE_STATUS_FILE_PATH, config.getStatusFilePath(),
+                VipStatus.class, false);
+        if (config.isEnableProxyStatsEndpoints()) {
+            server.addRestResource("/proxy-stats", ProxyStats.ATTRIBUTE_PULSAR_PROXY_NAME, service,
+                    ProxyStats.class);
+            if (service != null) {
+                PrometheusMetricsServlet metricsServlet = service.getMetricsServlet();
+                if (metricsServlet != null) {
+                    server.addServlet("/metrics", new ServletHolder(metricsServlet),
+                            Collections.emptyList(), config.isAuthenticateMetricsEndpoint());
+                }
             }
         }
-        server.addRestResource("/", VipStatus.ATTRIBUTE_STATUS_FILE_PATH, config.getStatusFilePath(), VipStatus.class);
-        server.addRestResource("/proxy-stats", ProxyStats.ATTRIBUTE_PULSAR_PROXY_NAME, service, ProxyStats.class);
 
         AdminProxyHandler adminProxyHandler = new AdminProxyHandler(config, discoveryProvider);
         ServletHolder servletHolder = new ServletHolder(adminProxyHandler);
@@ -307,12 +312,6 @@ public class ProxyServiceStarter {
                     new ServletHolder(readerWebSocketServlet));
             server.addServlet(WebSocketReaderServlet.SERVLET_PATH_V2,
                     new ServletHolder(readerWebSocketServlet));
-
-            final WebSocketServlet pingPongWebSocketServlet = new WebSocketPingPongServlet(webSocketService);
-            server.addServlet(WebSocketPingPongServlet.SERVLET_PATH,
-                    new ServletHolder(pingPongWebSocketServlet));
-            server.addServlet(WebSocketPingPongServlet.SERVLET_PATH_V2,
-                    new ServletHolder(pingPongWebSocketServlet));
         }
     }
 

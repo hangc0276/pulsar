@@ -485,9 +485,19 @@ public class ManagedLedgerFactoryImpl implements ManagedLedgerFactory {
     }
 
     void close(ManagedLedger ledger) {
-        // Remove the ledger from the internal factory cache
-        ledgers.remove(ledger.getName());
-        entryCacheManager.removeEntryCache(ledger.getName());
+        // If the future in map is not done or has exceptionally complete, it means that @param-ledger is not in the
+        // map.
+        CompletableFuture<ManagedLedgerImpl> ledgerFuture = ledgers.get(ledger.getName());
+        if (ledgerFuture == null || !ledgerFuture.isDone() || ledgerFuture.isCompletedExceptionally()){
+            return;
+        }
+        if (ledgerFuture.join() != ledger){
+            return;
+        }
+        // Remove the ledger from the internal factory cache.
+        if (ledgers.remove(ledger.getName(), ledgerFuture)) {
+            entryCacheManager.removeEntryCache(ledger.getName());
+        }
     }
 
     public CompletableFuture<Void> shutdownAsync() throws ManagedLedgerException {
@@ -838,7 +848,10 @@ public class ManagedLedgerFactoryImpl implements ManagedLedgerFactory {
                 // If it's open, delete in the normal way
                 ml.asyncDelete(callback, ctx);
             }).exceptionally(ex -> {
-                // If it's failing to get open, just delete from metadata
+                // If it fails to get open, it will be cleaned by managed ledger opening error handling.
+                // then retry will go to `future=null` branch.
+                final Throwable rc = FutureUtil.unwrapCompletionException(ex);
+                callback.deleteLedgerFailed(getManagedLedgerException(rc), ctx);
                 return null;
             });
         }

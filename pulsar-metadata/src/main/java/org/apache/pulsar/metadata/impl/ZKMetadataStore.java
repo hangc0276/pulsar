@@ -163,6 +163,24 @@ public class ZKMetadataStore extends AbstractBatchedMetadataStore
     }
 
     @Override
+    public CompletableFuture<Void> sync(String path) {
+        CompletableFuture<Void> result = new CompletableFuture<>();
+        zkc.sync(path, new AsyncCallback.VoidCallback() {
+            @Override
+            public void processResult(int rc, String s, Object o) {
+                Code code = Code.get(rc);
+                if (code == Code.OK) {
+                    result.complete(null);
+                } else {
+                    MetadataStoreException e = getException(code, path);
+                    result.completeExceptionally(e);
+                }
+            }
+        }, null);
+        return result;
+    }
+
+    @Override
     protected void batchOperation(List<MetadataOp> ops) {
         try {
             zkc.multi(ops.stream().map(this::convertOp).collect(Collectors.toList()), (rc, path, ctx, results) -> {
@@ -182,29 +200,29 @@ public class ZKMetadataStore extends AbstractBatchedMetadataStore
                 }
 
                 // Trigger all the futures in the batch
-                for (int i = 0; i < ops.size(); i++) {
-                    OpResult opr = results.get(i);
-                    MetadataOp op = ops.get(i);
-
-                    switch (op.getType()) {
-                        case PUT:
-                            handlePutResult(op.asPut(), opr);
-                            break;
-                        case DELETE:
-                            handleDeleteResult(op.asDelete(), opr);
-                            break;
-                        case GET:
-                            handleGetResult(op.asGet(), opr);
-                            break;
-                        case GET_CHILDREN:
-                            handleGetChildrenResult(op.asGetChildren(), opr);
-                            break;
-
-                        default:
-                            op.getFuture().completeExceptionally(new MetadataStoreException(
-                                    "Operation type not supported in multi: " + op.getType()));
-                    }
-                }
+                execute(() -> {
+                    for (int i = 0; i < ops.size(); i++) {
+                        OpResult opr = results.get(i);
+                        MetadataOp op = ops.get(i);
+                            switch (op.getType()) {
+                                case PUT:
+                                    handlePutResult(op.asPut(), opr);
+                                    break;
+                                case DELETE:
+                                    handleDeleteResult(op.asDelete(), opr);
+                                    break;
+                                case GET:
+                                    handleGetResult(op.asGet(), opr);
+                                    break;
+                                case GET_CHILDREN:
+                                    handleGetChildrenResult(op.asGetChildren(), opr);
+                                    break;
+                                default:
+                                    op.getFuture().completeExceptionally(new MetadataStoreException(
+                                            "Operation type not supported in multi: " + op.getType()));
+                            }
+                        }
+                }, () -> ops.stream().map(MetadataOp::getFuture).collect(Collectors.toList()));
             }, null);
         } catch (Throwable t) {
             ops.forEach(o -> o.getFuture().completeExceptionally(new MetadataStoreException(t)));

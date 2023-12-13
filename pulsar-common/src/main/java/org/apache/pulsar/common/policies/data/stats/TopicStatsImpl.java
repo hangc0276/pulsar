@@ -41,6 +41,7 @@ import org.apache.pulsar.common.policies.data.TopicStats;
 
 /**
  * Statistics for a Pulsar topic.
+ * This class is not thread-safe.
  */
 @Data
 public class TopicStatsImpl implements TopicStats {
@@ -207,12 +208,13 @@ public class TopicStatsImpl implements TopicStats {
         this.lastOffloadFailureTimeStamp = 0;
         this.lastOffloadSuccessTimeStamp = 0;
         this.publishRateLimitedTimes = 0L;
+        this.earliestMsgPublishTimeInBacklogs = 0L;
         this.delayedMessageIndexSizeInBytes = 0;
         this.compaction.reset();
     }
 
     // if the stats are added for the 1st time, we will need to make a copy of these stats and add it to the current
-    // stats.
+    // stats. This stat addition is not thread-safe.
     public TopicStatsImpl add(TopicStats ts) {
         TopicStatsImpl stats = (TopicStatsImpl) ts;
 
@@ -239,7 +241,8 @@ public class TopicStatsImpl implements TopicStats {
         this.abortedTxnCount = stats.abortedTxnCount;
         this.committedTxnCount = stats.committedTxnCount;
 
-        stats.getPublishers().forEach(s -> {
+        for (int index = 0; index < stats.getPublishers().size(); index++) {
+           PublisherStats s = stats.getPublishers().get(index);
            if (s.isSupportsPartialProducer() && s.getProducerName() != null) {
                this.publishersMap.computeIfAbsent(s.getProducerName(), key -> {
                    final PublisherStatsImpl newStats = new PublisherStatsImpl();
@@ -248,19 +251,20 @@ public class TopicStatsImpl implements TopicStats {
                    return newStats;
                }).add((PublisherStatsImpl) s);
            } else {
-               if (this.publishers.size() != stats.publishers.size()) {
-                   for (int i = 0; i < stats.publishers.size(); i++) {
-                       PublisherStatsImpl newStats = new PublisherStatsImpl();
-                       newStats.setSupportsPartialProducer(false);
-                       this.publishers.add(newStats.add(stats.publishers.get(i)));
-                   }
-               } else {
-                   for (int i = 0; i < stats.publishers.size(); i++) {
-                       this.publishers.get(i).add(stats.publishers.get(i));
-                   }
+               // Add a publisher stat entry to this.publishers
+               // if this.publishers.size() is smaller than
+               // the input stats.publishers.size().
+               // Here, index == this.publishers.size() means
+               // this.publishers.size() is smaller than the input stats.publishers.size()
+               if (index == this.publishers.size()) {
+                   PublisherStatsImpl newStats = new PublisherStatsImpl();
+                   newStats.setSupportsPartialProducer(false);
+                   this.publishers.add(newStats);
                }
+               this.publishers.get(index)
+                       .add((PublisherStatsImpl) s);
            }
-        });
+        }
 
         if (this.subscriptions.size() != stats.subscriptions.size()) {
             for (String subscription : stats.subscriptions.keySet()) {
@@ -293,6 +297,17 @@ public class TopicStatsImpl implements TopicStats {
                     this.replication.put(repl, replStats.add(stats.replication.get(repl)));
                 }
             }
+        }
+        if (earliestMsgPublishTimeInBacklogs != 0 && ((TopicStatsImpl) ts).earliestMsgPublishTimeInBacklogs != 0) {
+            earliestMsgPublishTimeInBacklogs = Math.min(
+                    earliestMsgPublishTimeInBacklogs,
+                    ((TopicStatsImpl) ts).earliestMsgPublishTimeInBacklogs
+            );
+        } else {
+            earliestMsgPublishTimeInBacklogs = Math.max(
+                    earliestMsgPublishTimeInBacklogs,
+                    ((TopicStatsImpl) ts).earliestMsgPublishTimeInBacklogs
+            );
         }
         return this;
     }

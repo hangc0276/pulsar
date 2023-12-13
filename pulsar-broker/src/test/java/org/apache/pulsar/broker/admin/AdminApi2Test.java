@@ -18,6 +18,7 @@
  */
 package org.apache.pulsar.broker.admin;
 
+import static java.util.concurrent.TimeUnit.MINUTES;
 import static org.apache.commons.lang3.StringUtils.isBlank;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
@@ -36,6 +37,7 @@ import com.google.common.collect.Sets;
 import java.lang.reflect.Field;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.time.Clock;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -58,6 +60,7 @@ import org.apache.pulsar.broker.PulsarService;
 import org.apache.pulsar.broker.admin.AdminApiTest.MockedPulsarService;
 import org.apache.pulsar.broker.auth.MockedPulsarServiceBaseTest;
 import org.apache.pulsar.broker.loadbalance.impl.ModularLoadManagerImpl;
+import org.apache.pulsar.broker.loadbalance.impl.ModularLoadManagerWrapper;
 import org.apache.pulsar.broker.loadbalance.impl.SimpleLoadManagerImpl;
 import org.apache.pulsar.broker.service.Topic;
 import org.apache.pulsar.broker.service.persistent.PersistentSubscription;
@@ -105,6 +108,7 @@ import org.apache.pulsar.common.policies.data.RetentionPolicies;
 import org.apache.pulsar.common.policies.data.SubscriptionStats;
 import org.apache.pulsar.common.policies.data.TenantInfoImpl;
 import org.apache.pulsar.common.policies.data.TopicStats;
+import org.apache.pulsar.common.policies.data.TopicType;
 import org.apache.pulsar.common.policies.data.impl.BacklogQuotaImpl;
 import org.awaitility.Awaitility;
 import org.testng.Assert;
@@ -138,6 +142,37 @@ public class AdminApi2Test extends MockedPulsarServiceBaseTest {
         admin.tenants().createTenant("prop-xyz", tenantInfo);
         admin.namespaces().createNamespace("prop-xyz/ns1", Sets.newHashSet("test"));
     }
+
+    @Test
+    public void testExceptionOfMaxTopicsPerNamespaceCanBeHanle() throws Exception {
+        super.internalCleanup();
+        conf.setMaxTopicsPerNamespace(3);
+        super.internalSetup();
+        String topic = "persistent://testTenant/ns1/test_create_topic_v";
+        TenantInfoImpl tenantInfo = new TenantInfoImpl(Sets.newHashSet("role1", "role2"),
+                Sets.newHashSet("test"));
+        // check producer/consumer auto create non-partitioned topic
+        conf.setAllowAutoTopicCreationType(TopicType.NON_PARTITIONED.toString());
+        admin.clusters().createCluster("test", ClusterData.builder().serviceUrl(brokerUrl.toString()).build());
+        admin.tenants().createTenant("testTenant", tenantInfo);
+        admin.namespaces().createNamespace("testTenant/ns1", Sets.newHashSet("test"));
+
+        pulsarClient.newProducer().topic(topic + "1").create().close();
+        pulsarClient.newProducer().topic(topic + "2").create().close();
+        pulsarClient.newConsumer().topic(topic + "3").subscriptionName("test_sub").subscribe().close();
+        try {
+            pulsarClient.newConsumer().topic(topic + "4").subscriptionName("test_sub")
+                    .subscribeAsync().get(5, TimeUnit.SECONDS);
+            Assert.fail();
+        } catch (Exception e) {
+            assertTrue(e.getCause() instanceof PulsarClientException.NotAllowedException);
+        }
+
+        // reset configuration
+        conf.setMaxTopicsPerNamespace(0);
+        conf.setDefaultNumPartitions(1);
+    }
+
 
     @AfterMethod(alwaysRun = true)
     @Override
@@ -1390,6 +1425,8 @@ public class AdminApi2Test extends MockedPulsarServiceBaseTest {
     @Test
     public void testDeleteNamespace() throws Exception {
         pulsar.getConfiguration().setForceDeleteNamespaceAllowed(false);
+        pulsar.getConfiguration().setMetadataStoreUrl("127.0.0.1:2181");
+        pulsar.getConfiguration().setConfigurationMetadataStoreUrl("127.0.0.1:2182");
 
         String tenant = "test-tenant";
         assertFalse(admin.tenants().getTenants().contains(tenant));
@@ -1409,6 +1446,29 @@ public class AdminApi2Test extends MockedPulsarServiceBaseTest {
         admin.topics().createPartitionedTopic(topic, 10);
         assertFalse(admin.topics().getList(namespace).isEmpty());
 
+        final String managedLedgersPath = "/managed-ledgers/" + namespace;
+        final String bundleDataPath = "/loadbalance/bundle-data/" + namespace;
+        // Trigger bundle owned by brokers.
+        pulsarClient.newProducer().topic(topic).create().close();
+        // Trigger bundle data write to ZK.
+        Awaitility.await().untilAsserted(() -> {
+            boolean bundleDataWereWriten = false;
+            for (PulsarService ps : new PulsarService[]{pulsar, mockPulsarSetup.getPulsar()}) {
+                ModularLoadManagerWrapper loadManager = (ModularLoadManagerWrapper) ps.getLoadManager().get();
+                ModularLoadManagerImpl loadManagerImpl = (ModularLoadManagerImpl) loadManager.getLoadManager();
+                ps.getBrokerService().updateRates();
+                loadManagerImpl.updateLocalBrokerData();
+                loadManagerImpl.writeBundleDataOnZooKeeper();
+                bundleDataWereWriten = bundleDataWereWriten || ps.getLocalMetadataStore().exists(bundleDataPath).join();
+            }
+            assertTrue(bundleDataWereWriten);
+        });
+
+        // assert znode exists in metadata store
+        assertTrue(pulsar.getLocalMetadataStore().exists(bundleDataPath).join());
+        assertTrue(pulsar.getLocalMetadataStore().exists(managedLedgersPath).join());
+
+
         try {
             deleteNamespaceGraceFully(namespace, false);
             fail("should have failed due to namespace not empty");
@@ -1425,12 +1485,9 @@ public class AdminApi2Test extends MockedPulsarServiceBaseTest {
         assertFalse(admin.namespaces().getNamespaces(tenant).contains(namespace));
         assertTrue(admin.namespaces().getNamespaces(tenant).isEmpty());
 
-
-        final String managedLedgersPath = "/managed-ledgers/" + namespace;
+        // assert znode deleted in metadata store
         assertFalse(pulsar.getLocalMetadataStore().exists(managedLedgersPath).join());
 
-
-        final String bundleDataPath = "/loadbalance/bundle-data/" + namespace;
         assertFalse(pulsar.getLocalMetadataStore().exists(bundleDataPath).join());
     }
 
@@ -1449,7 +1506,12 @@ public class AdminApi2Test extends MockedPulsarServiceBaseTest {
 
         // create namespace2
         String namespace = tenant + "/test-ns2";
-        admin.namespaces().createNamespace(namespace, Sets.newHashSet("test"));
+        admin.namespaces().createNamespace(namespace, Set.of("test"));
+        admin.topics().createNonPartitionedTopic(namespace + "/tobedeleted");
+        // verify namespace can be deleted even without topic policy events
+        admin.namespaces().deleteNamespace(namespace, true);
+
+        admin.namespaces().createNamespace(namespace, Set.of("test"));
         // create topic
         String topic = namespace + "/test-topic2";
         Producer<byte[]> producer = pulsarClient.newProducer().topic(topic).create();
@@ -1590,6 +1652,8 @@ public class AdminApi2Test extends MockedPulsarServiceBaseTest {
             .acknowledgmentGroupTime(0, TimeUnit.SECONDS)
             .subscribe();
 
+        long start1 = 0;
+        long start2 = 0;
         @Cleanup
         Producer<byte[]> producer = client.newProducer()
             .topic(topic)
@@ -1597,6 +1661,12 @@ public class AdminApi2Test extends MockedPulsarServiceBaseTest {
             .create();
 
         for (int i = 0; i < 10; i++) {
+            if (i == 0) {
+                start1 = Clock.systemUTC().millis();
+            }
+            if (i == 5) {
+                start2 = Clock.systemUTC().millis();
+            }
             if (i > 4) {
                 producer.newMessage()
                     .value("message-1".getBytes(StandardCharsets.UTF_8))
@@ -1607,22 +1677,26 @@ public class AdminApi2Test extends MockedPulsarServiceBaseTest {
             }
         }
         // wait until the message add to delay queue.
+        long finalStart1 = start1;
         Awaitility.await().untilAsserted(() -> {
             TopicStats topicStats = admin.topics().getPartitionedStats(topic, false, true, true, true);
             assertEquals(topicStats.getSubscriptions().get(subName).getMsgBacklog(), 10);
             assertEquals(topicStats.getSubscriptions().get(subName).getBacklogSize(), 440);
             assertEquals(topicStats.getSubscriptions().get(subName).getMsgBacklogNoDelayed(), 5);
+            assertTrue(topicStats.getSubscriptions().get(subName).getEarliestMsgPublishTimeInBacklog() >= finalStart1);
         });
 
         for (int i = 0; i < 5; i++) {
             consumer.acknowledge(consumer.receive());
         }
         // Wait the ack send.
-        Awaitility.await().untilAsserted(() -> {
+        long finalStart2 = start2;
+        Awaitility.await().timeout(1, MINUTES).untilAsserted(() -> {
             TopicStats topicStats2 = admin.topics().getPartitionedStats(topic, false, true, true, true);
             assertEquals(topicStats2.getSubscriptions().get(subName).getMsgBacklog(), 5);
             assertEquals(topicStats2.getSubscriptions().get(subName).getBacklogSize(), 223);
             assertEquals(topicStats2.getSubscriptions().get(subName).getMsgBacklogNoDelayed(), 0);
+            assertTrue(topicStats2.getSubscriptions().get(subName).getEarliestMsgPublishTimeInBacklog() >= finalStart2);
         });
 
     }
@@ -1671,7 +1745,6 @@ public class AdminApi2Test extends MockedPulsarServiceBaseTest {
 
     @Test
     public void testForceDeleteNamespace() throws Exception {
-        conf.setForceDeleteNamespaceAllowed(true);
         final String namespaceName = "prop-xyz2/ns1";
         TenantInfoImpl tenantInfo = new TenantInfoImpl(Sets.newHashSet("role1", "role2"), Sets.newHashSet("test"));
         admin.tenants().createTenant("prop-xyz2", tenantInfo);
@@ -2460,6 +2533,32 @@ public class AdminApi2Test extends MockedPulsarServiceBaseTest {
 
         // validate update partition is success
         assertEquals(admin.topics().getPartitionedTopicMetadata(partitionedTopicName).partitions, newPartitions);
+    }
+
+    /**
+     * Validate retring failed partitioned topic should succeed.
+     * @throws Exception
+     */
+    @Test
+    public void testTopicStatsWithEarliestTimeInBacklogIfNoBacklog() throws Exception {
+        final String topicName = BrokerTestUtil.newUniqueName("persistent://prop-xyz/ns1/tp_");
+        final String subscriptionName = "s1";
+        admin.topics().createNonPartitionedTopic(topicName);
+        admin.topics().createSubscription(topicName, subscriptionName, MessageId.earliest);
+
+        // Send one message.
+        Producer<String> producer = pulsarClient.newProducer(Schema.STRING).topic(topicName).enableBatching(false)
+                .create();
+        MessageIdImpl messageId = (MessageIdImpl) producer.send("123");
+        // Catch up.
+        admin.topics().skipAllMessages(topicName, subscriptionName);
+        // Get topic stats with earliestTimeInBacklog
+        TopicStats topicStats = admin.topics().getStats(topicName, false, false, true);
+        assertEquals(topicStats.getSubscriptions().get(subscriptionName).getEarliestMsgPublishTimeInBacklog(), -1L);
+
+        // cleanup.
+        producer.close();
+        admin.topics().delete(topicName);
     }
 
     @Test(dataProvider = "topicType")

@@ -49,7 +49,7 @@ RUN chmod g+w /pulsar/lib/presto
 ### Create 2nd stage from Ubuntu image
 ### and add OpenJDK and Python dependencies (for Pulsar functions)
 
-FROM ubuntu:20.04
+FROM ubuntu:22.04
 
 ARG DEBIAN_FRONTEND=noninteractive
 ARG UBUNTU_MIRROR=mirror://mirrors.ubuntu.com/mirrors.txt
@@ -67,7 +67,7 @@ RUN sed -i "s|http://archive\.ubuntu\.com/ubuntu/|${UBUNTU_MIRROR:-mirror://mirr
      && apt-get clean \
      && rm -rf /var/lib/apt/lists/*
 
-RUN pip3 install pyyaml==5.4.1
+RUN pip3 install pyyaml==6.0.1
 
 # Pulsar currently writes to the below directories, assuming the default configuration.
 # Note that number 4 is the reason that pulsar components need write access to the /pulsar directory.
@@ -79,7 +79,6 @@ RUN mkdir /pulsar && chmod g+w /pulsar
 
 ENV JAVA_HOME /usr/lib/jvm/java-17-openjdk-amd64
 RUN echo networkaddress.cache.ttl=1 >> /usr/lib/jvm/java-17-openjdk-amd64/conf/security/java.security
-ADD target/python-client/ /pulsar/pulsar-client
 
 ENV PULSAR_ROOT_LOGGER=INFO,CONSOLE
 

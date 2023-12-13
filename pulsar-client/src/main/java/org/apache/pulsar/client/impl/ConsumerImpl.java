@@ -21,6 +21,7 @@ package org.apache.pulsar.client.impl;
 import static com.google.common.base.Preconditions.checkArgument;
 import static org.apache.pulsar.common.protocol.Commands.DEFAULT_CONSUMER_EPOCH;
 import static org.apache.pulsar.common.protocol.Commands.hasChecksum;
+import static org.apache.pulsar.common.protocol.Commands.serializeWithSize;
 import static org.apache.pulsar.common.util.Runnables.catchingAndLoggingThrowables;
 import com.google.common.collect.ComparisonChain;
 import com.google.common.collect.Iterables;
@@ -31,9 +32,11 @@ import io.netty.util.Recycler;
 import io.netty.util.Recycler.Handle;
 import io.netty.util.ReferenceCountUtil;
 import io.netty.util.Timeout;
+import io.netty.util.concurrent.FastThreadLocal;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedList;
@@ -64,6 +67,7 @@ import java.util.stream.Collectors;
 import lombok.AccessLevel;
 import lombok.Getter;
 import org.apache.commons.lang3.StringUtils;
+import org.apache.commons.lang3.tuple.Triple;
 import org.apache.pulsar.client.api.Consumer;
 import org.apache.pulsar.client.api.ConsumerCryptoFailureAction;
 import org.apache.pulsar.client.api.DeadLetterPolicy;
@@ -88,7 +92,9 @@ import org.apache.pulsar.client.util.RetryMessageUtil;
 import org.apache.pulsar.common.allocator.PulsarByteBufAllocator;
 import org.apache.pulsar.common.api.EncryptionContext;
 import org.apache.pulsar.common.api.EncryptionContext.EncryptionKey;
+import org.apache.pulsar.common.api.proto.BaseCommand;
 import org.apache.pulsar.common.api.proto.BrokerEntryMetadata;
+import org.apache.pulsar.common.api.proto.CommandAck;
 import org.apache.pulsar.common.api.proto.CommandAck.AckType;
 import org.apache.pulsar.common.api.proto.CommandAck.ValidationError;
 import org.apache.pulsar.common.api.proto.CommandMessage;
@@ -110,6 +116,7 @@ import org.apache.pulsar.common.util.CompletableFutureCancellationHandler;
 import org.apache.pulsar.common.util.FutureUtil;
 import org.apache.pulsar.common.util.SafeCollectionUtils;
 import org.apache.pulsar.common.util.collections.BitSetRecyclable;
+import org.apache.pulsar.common.util.collections.ConcurrentBitSetRecyclable;
 import org.apache.pulsar.common.util.collections.ConcurrentOpenHashMap;
 import org.apache.pulsar.common.util.collections.GrowableArrayBlockingQueue;
 import org.slf4j.Logger;
@@ -416,7 +423,7 @@ public class ConsumerImpl<T> extends ConsumerBase<T> implements ConnectionHandle
                 unsubscribeFuture.completeExceptionally(
                     PulsarClientException.wrap(e.getCause(),
                         String.format("Failed to unsubscribe the subscription %s of topic %s",
-                            topicName.toString(), subscription)));
+                                subscription, topicName.toString())));
                 return null;
             });
         } else {
@@ -652,6 +659,7 @@ public class ConsumerImpl<T> extends ConsumerBase<T> implements ConnectionHandle
                     retryLetterProducer = client.newProducer(schema)
                             .topic(this.deadLetterPolicy.getRetryLetterTopic())
                             .enableBatching(false)
+                            .enableChunking(true)
                             .blockIfQueueFull(false)
                             .create();
                 }
@@ -801,16 +809,17 @@ public class ConsumerImpl<T> extends ConsumerBase<T> implements ConnectionHandle
     }
 
     @Override
-    public void connectionOpened(final ClientCnx cnx) {
+    public CompletableFuture<Void> connectionOpened(final ClientCnx cnx) {
         previousExceptions.clear();
 
-        if (getState() == State.Closing || getState() == State.Closed) {
+        final State state = getState();
+        if (state == State.Closing || state == State.Closed) {
             setState(State.Closed);
             closeConsumerTasks();
             deregisterFromClientCnx();
             client.cleanupConsumer(this);
             clearReceiverQueue();
-            return;
+            return CompletableFuture.completedFuture(null);
         }
 
         log.info("[{}][{}] Subscribing to topic on cnx {}, consumerId {}",
@@ -859,6 +868,7 @@ public class ConsumerImpl<T> extends ConsumerBase<T> implements ConnectionHandle
                 && startMessageId.equals(initialStartMessageId)) ? startMessageRollbackDurationInSec : 0;
 
         // synchronized this, because redeliverUnAckMessage eliminate the epoch inconsistency between them
+        final CompletableFuture<Void> future = new CompletableFuture<>();
         synchronized (this) {
             setClientCnx(cnx);
             ByteBuf request = Commands.newSubscribe(topic, subscription, consumerId, requestId, getSubType(),
@@ -880,6 +890,7 @@ public class ConsumerImpl<T> extends ConsumerBase<T> implements ConnectionHandle
                         deregisterFromClientCnx();
                         client.cleanupConsumer(this);
                         cnx.channel().close();
+                        future.complete(null);
                         return;
                     }
                 }
@@ -892,12 +903,14 @@ public class ConsumerImpl<T> extends ConsumerBase<T> implements ConnectionHandle
                 if (!(firstTimeConnect && hasParentConsumer) && getCurrentReceiverQueueSize() != 0) {
                     increaseAvailablePermits(cnx, getCurrentReceiverQueueSize());
                 }
+                future.complete(null);
             }).exceptionally((e) -> {
                 deregisterFromClientCnx();
                 if (getState() == State.Closing || getState() == State.Closed) {
                     // Consumer was closed while reconnecting, close the connection to make sure the broker
                     // drops the consumer on its side
                     cnx.channel().close();
+                    future.complete(null);
                     return null;
                 }
                 log.warn("[{}][{}] Failed to subscribe to topic on {}", topic,
@@ -915,7 +928,7 @@ public class ConsumerImpl<T> extends ConsumerBase<T> implements ConnectionHandle
                 if (e.getCause() instanceof PulsarClientException
                         && PulsarClientException.isRetriableError(e.getCause())
                         && System.currentTimeMillis() < SUBSCRIBE_DEADLINE_UPDATER.get(ConsumerImpl.this)) {
-                    reconnectLater(e.getCause());
+                    future.completeExceptionally(e.getCause());
                 } else if (!subscribeFuture.isDone()) {
                     // unable to create new consumer, fail operation
                     setState(State.Failed);
@@ -939,11 +952,16 @@ public class ConsumerImpl<T> extends ConsumerBase<T> implements ConnectionHandle
                             topic, subscription, cnx.channel().remoteAddress());
                 } else {
                     // consumer was subscribed and connected but we got some error, keep trying
-                    reconnectLater(e.getCause());
+                    future.completeExceptionally(e.getCause());
+                }
+
+                if (!future.isDone()) {
+                    future.complete(null);
                 }
                 return null;
             });
         }
+        return future;
     }
 
     protected void consumerIsReconnectedToBroker(ClientCnx cnx, int currentQueueSize) {
@@ -1028,7 +1046,7 @@ public class ConsumerImpl<T> extends ConsumerBase<T> implements ConnectionHandle
                 setState(State.Failed);
                 if (nonRetriableError) {
                     log.info("[{}] Consumer creation failed for consumer {} with unretriableError {}",
-                            topic, consumerId, exception);
+                            topic, consumerId, exception.getMessage());
                 } else {
                     log.info("[{}] Consumer creation failed for consumer {} after timeout", topic, consumerId);
                 }
@@ -1085,7 +1103,23 @@ public class ConsumerImpl<T> extends ConsumerBase<T> implements ConnectionHandle
             });
         }
 
-        return closeFuture;
+        ArrayList<CompletableFuture<Void>> closeFutures = new ArrayList<>(4);
+        closeFutures.add(closeFuture);
+        if (retryLetterProducer != null) {
+            closeFutures.add(retryLetterProducer.closeAsync().whenComplete((ignore, ex) -> {
+                if (ex != null) {
+                    log.warn("Exception ignored in closing retryLetterProducer of consumer", ex);
+                }
+            }));
+        }
+        if (deadLetterProducer != null) {
+            closeFutures.add(deadLetterProducer.thenCompose(p -> p.closeAsync()).whenComplete((ignore, ex) -> {
+                if (ex != null) {
+                    log.warn("Exception ignored in closing deadLetterProducer of consumer", ex);
+                }
+            }));
+        }
+        return FutureUtil.waitForAll(closeFutures);
     }
 
     private void cleanupAtClose(CompletableFuture<Void> closeFuture, Throwable exception) {
@@ -1425,7 +1459,9 @@ public class ConsumerImpl<T> extends ConsumerBase<T> implements ConnectionHandle
 
     private ByteBuf processMessageChunk(ByteBuf compressedPayload, MessageMetadata msgMetadata, MessageIdImpl msgId,
             MessageIdData messageId, ClientCnx cnx) {
-
+        if (msgMetadata.getChunkId() != (msgMetadata.getNumChunksFromMsg() - 1)) {
+            increaseAvailablePermits(cnx);
+        }
         // Lazy task scheduling to expire incomplete chunk message
         if (!expireChunkMessageTaskScheduled && expireTimeOfIncompleteChunkedMessageMillis > 0) {
             ((ScheduledExecutorService) client.getScheduledExecutorProvider().getExecutor()).scheduleAtFixedRate(
@@ -1437,25 +1473,93 @@ public class ConsumerImpl<T> extends ConsumerBase<T> implements ConnectionHandle
             expireChunkMessageTaskScheduled = true;
         }
 
+        ChunkedMessageCtx chunkedMsgCtx = chunkedMessagesMap.get(msgMetadata.getUuid());
+
         if (msgMetadata.getChunkId() == 0) {
-            ByteBuf chunkedMsgBuffer = PulsarByteBufAllocator.DEFAULT.buffer(msgMetadata.getTotalChunkMsgSize(),
-                    msgMetadata.getTotalChunkMsgSize());
-            int totalChunks = msgMetadata.getNumChunksFromMsg();
-            chunkedMessagesMap.computeIfAbsent(msgMetadata.getUuid(),
-                    (key) -> ChunkedMessageCtx.get(totalChunks, chunkedMsgBuffer));
+            if (chunkedMsgCtx != null) {
+                // Handle ack hole case when receive duplicated chunks.
+                // There are two situation that receives chunks with the same sequence ID and chunk ID.
+                // Situation 1 - Message redeliver:
+                // For example:
+                //     Chunk-1 sequence ID: 0, chunk ID: 0, msgID: 1:1
+                //     Chunk-2 sequence ID: 0, chunk ID: 1, msgID: 1:2
+                //     Chunk-3 sequence ID: 0, chunk ID: 0, msgID: 1:1
+                //     Chunk-4 sequence ID: 0, chunk ID: 1, msgID: 1:2
+                //     Chunk-5 sequence ID: 0, chunk ID: 2, msgID: 1:3
+                // In this case, chunk-3 and chunk-4 have the same msgID with chunk-1 and chunk-2.
+                // This may be caused by message redeliver, we can't ack any chunk in this case here.
+                // Situation 2 - Corrupted chunk message
+                // For example:
+                //     Chunk-1 sequence ID: 0, chunk ID: 0, msgID: 1:1
+                //     Chunk-2 sequence ID: 0, chunk ID: 1, msgID: 1:2
+                //     Chunk-3 sequence ID: 0, chunk ID: 0, msgID: 1:3
+                //     Chunk-4 sequence ID: 0, chunk ID: 1, msgID: 1:4
+                //     Chunk-5 sequence ID: 0, chunk ID: 2, msgID: 1:5
+                // In this case, all the chunks with different msgIDs and are persistent in the topic.
+                // But Chunk-1 and Chunk-2 belong to a corrupted chunk message that must be skipped since
+                // they will not be delivered to end users. So we should ack them here to avoid ack hole.
+                boolean isCorruptedChunkMessageDetected = Arrays.stream(chunkedMsgCtx.chunkedMessageIds)
+                        .noneMatch(messageId1 -> messageId1 != null && messageId1.ledgerId == messageId.getLedgerId()
+                                && messageId1.entryId == messageId.getEntryId());
+                if (isCorruptedChunkMessageDetected) {
+                    Arrays.stream(chunkedMsgCtx.chunkedMessageIds).forEach(messageId1 -> {
+                        if (messageId1 != null) {
+                            doAcknowledge(messageId1, AckType.Individual, Collections.emptyMap(), null);
+                        }
+                    });
+                }
+                // The first chunk of a new chunked-message received before receiving other chunks of previous
+                // chunked-message
+                // so, remove previous chunked-message from map and release buffer
+                if (chunkedMsgCtx.chunkedMsgBuffer != null) {
+                    ReferenceCountUtil.safeRelease(chunkedMsgCtx.chunkedMsgBuffer);
+                }
+                chunkedMsgCtx.recycle();
+                chunkedMessagesMap.remove(msgMetadata.getUuid());
+            }
             pendingChunkedMessageCount++;
             if (maxPendingChunkedMessage > 0 && pendingChunkedMessageCount > maxPendingChunkedMessage) {
                 removeOldestPendingChunkedMessage();
             }
+            int totalChunks = msgMetadata.getNumChunksFromMsg();
+            ByteBuf chunkedMsgBuffer = PulsarByteBufAllocator.DEFAULT.buffer(msgMetadata.getTotalChunkMsgSize(),
+                    msgMetadata.getTotalChunkMsgSize());
+            chunkedMsgCtx = chunkedMessagesMap.computeIfAbsent(msgMetadata.getUuid(),
+                    (key) -> ChunkedMessageCtx.get(totalChunks, chunkedMsgBuffer));
             pendingChunkedMessageUuidQueue.add(msgMetadata.getUuid());
         }
 
-        ChunkedMessageCtx chunkedMsgCtx = chunkedMessagesMap.get(msgMetadata.getUuid());
         // discard message if chunk is out-of-order
         if (chunkedMsgCtx == null || chunkedMsgCtx.chunkedMsgBuffer == null
                 || msgMetadata.getChunkId() != (chunkedMsgCtx.lastChunkedMessageId + 1)) {
+            // Filter and ack duplicated chunks instead of discard ctx.
+            // For example:
+            //     Chunk-1 sequence ID: 0, chunk ID: 0, msgID: 1:1
+            //     Chunk-2 sequence ID: 0, chunk ID: 1, msgID: 1:2
+            //     Chunk-3 sequence ID: 0, chunk ID: 2, msgID: 1:3
+            //     Chunk-4 sequence ID: 0, chunk ID: 1, msgID: 1:4
+            //     Chunk-5 sequence ID: 0, chunk ID: 2, msgID: 1:5
+            //     Chunk-6 sequence ID: 0, chunk ID: 3, msgID: 1:6
+            // We should filter and ack chunk-4 and chunk-5.
+            if (chunkedMsgCtx != null && msgMetadata.getChunkId() <= chunkedMsgCtx.lastChunkedMessageId) {
+                log.warn("[{}] Receive a duplicated chunk message with messageId [{}], last-chunk-Id [{}], "
+                                + "chunkId [{}], sequenceId [{}]",
+                        msgMetadata.getProducerName(), msgId, chunkedMsgCtx.lastChunkedMessageId,
+                        msgMetadata.getChunkId(), msgMetadata.getSequenceId());
+                compressedPayload.release();
+                // Just like the above logic of receiving the first chunk again. We only ack this chunk in the message
+                // duplication case.
+                boolean isDuplicatedChunk = Arrays.stream(chunkedMsgCtx.chunkedMessageIds)
+                        .noneMatch(messageId1 -> messageId1 != null && messageId1.ledgerId == messageId.getLedgerId()
+                                && messageId1.entryId == messageId.getEntryId());
+                if (isDuplicatedChunk) {
+                    doAcknowledge(msgId, AckType.Individual, Collections.emptyMap(), null);
+                }
+                return null;
+            }
             // means we lost the first chunk: should never happen
-            log.info("Received unexpected chunk messageId {}, last-chunk-id{}, chunkId = {}", msgId,
+            log.info("[{}] [{}] Received unexpected chunk messageId {}, last-chunk-id = {}, chunkId = {}", topic,
+                    subscription, msgId,
                     (chunkedMsgCtx != null ? chunkedMsgCtx.lastChunkedMessageId : null), msgMetadata.getChunkId());
             if (chunkedMsgCtx != null) {
                 if (chunkedMsgCtx.chunkedMsgBuffer != null) {
@@ -1465,7 +1569,6 @@ public class ConsumerImpl<T> extends ConsumerBase<T> implements ConnectionHandle
             }
             chunkedMessagesMap.remove(msgMetadata.getUuid());
             compressedPayload.release();
-            increaseAvailablePermits(cnx);
             if (expireTimeOfIncompleteChunkedMessageMillis > 0
                     && System.currentTimeMillis() > (msgMetadata.getPublishTime()
                             + expireTimeOfIncompleteChunkedMessageMillis)) {
@@ -1484,7 +1587,6 @@ public class ConsumerImpl<T> extends ConsumerBase<T> implements ConnectionHandle
         // if final chunk is not received yet then release payload and return
         if (msgMetadata.getChunkId() != (msgMetadata.getNumChunksFromMsg() - 1)) {
             compressedPayload.release();
-            increaseAvailablePermits(cnx);
             return null;
         }
 
@@ -2111,6 +2213,8 @@ public class ConsumerImpl<T> extends ConsumerBase<T> implements ConnectionHandle
                                     .initialSubscriptionName(this.deadLetterPolicy.getInitialSubscriptionName())
                                     .topic(this.deadLetterPolicy.getDeadLetterTopic())
                                     .blockIfQueueFull(false)
+                                    .enableBatching(false)
+                                    .enableChunking(true)
                                     .createAsync();
                 }
             } finally {
@@ -2262,6 +2366,10 @@ public class ConsumerImpl<T> extends ConsumerBase<T> implements ConnectionHandle
 
     public CompletableFuture<Boolean> hasMessageAvailableAsync() {
         final CompletableFuture<Boolean> booleanFuture = new CompletableFuture<>();
+
+        if (incomingMessages != null && !incomingMessages.isEmpty()) {
+            return CompletableFuture.completedFuture(true);
+        }
 
         // we haven't read yet. use startMessageId for comparison
         if (lastDequeuedMessageId == MessageId.earliest) {
@@ -2466,9 +2574,9 @@ public class ConsumerImpl<T> extends ConsumerBase<T> implements ConnectionHandle
                 return;
             }
 
+            log.warn("[{}] [{}] Could not get connection while getLastMessageId -- Will try again in {} ms",
+                    topic, getHandlerName(), nextDelay);
             ((ScheduledExecutorService) client.getScheduledExecutorProvider().getExecutor()).schedule(() -> {
-                log.warn("[{}] [{}] Could not get connection while getLastMessageId -- Will try again in {} ms",
-                        topic, getHandlerName(), nextDelay);
                 remainingTime.addAndGet(-nextDelay);
                 internalGetLastMessageIdAsync(backoff, remainingTime, future);
             }, nextDelay, TimeUnit.MILLISECONDS);
@@ -2623,10 +2731,6 @@ public class ConsumerImpl<T> extends ConsumerBase<T> implements ConnectionHandle
         setClientCnx(null);
     }
 
-    void reconnectLater(Throwable exception) {
-        this.connectionHandler.reconnectLater(exception);
-    }
-
     void grabCnx() {
         this.connectionHandler.grabCnx();
     }
@@ -2732,15 +2836,14 @@ public class ConsumerImpl<T> extends ConsumerBase<T> implements ConnectionHandle
                                                                         ValidationError validationError,
                                                                         Map<String, Long> properties, TxnID txnID) {
         BitSetRecyclable bitSetRecyclable = null;
-        long ledgerId;
-        long entryId;
-        ByteBuf cmd;
+        final MessageIdImpl messageIdImpl = (MessageIdImpl) messageId;
+        final long ledgerId = messageIdImpl.getLedgerId();
+        final long entryId = messageIdImpl.getEntryId();
+        final List<ByteBuf> cmdList;
         long requestId = client.newRequestId();
         if (messageId instanceof BatchMessageIdImpl) {
             BatchMessageIdImpl batchMessageId = (BatchMessageIdImpl) messageId;
             bitSetRecyclable = BitSetRecyclable.create();
-            ledgerId = batchMessageId.getLedgerId();
-            entryId = batchMessageId.getEntryId();
             if (ackType == AckType.Cumulative) {
                 batchMessageId.ackCumulative();
                 bitSetRecyclable.set(0, batchMessageId.getBatchSize());
@@ -2749,15 +2852,37 @@ public class ConsumerImpl<T> extends ConsumerBase<T> implements ConnectionHandle
                 bitSetRecyclable.set(0, batchMessageId.getBatchSize());
                 bitSetRecyclable.clear(batchMessageId.getBatchIndex());
             }
-            cmd = Commands.newAck(consumerId, ledgerId, entryId, bitSetRecyclable, ackType, validationError, properties,
-                    txnID.getLeastSigBits(), txnID.getMostSigBits(), requestId, batchMessageId.getBatchSize());
+            cmdList = Collections.singletonList(Commands.newAck(consumerId, ledgerId, entryId, bitSetRecyclable,
+                    ackType, validationError, properties, txnID.getLeastSigBits(), txnID.getMostSigBits(), requestId,
+                    batchMessageId.getBatchSize()));
             bitSetRecyclable.recycle();
         } else {
-            MessageIdImpl singleMessage = (MessageIdImpl) messageId;
-            ledgerId = singleMessage.getLedgerId();
-            entryId = singleMessage.getEntryId();
-            cmd = Commands.newAck(consumerId, ledgerId, entryId, bitSetRecyclable, ackType,
-                    validationError, properties, txnID.getLeastSigBits(), txnID.getMostSigBits(), requestId);
+            MessageIdImpl[] chunkMsgIds = this.unAckedChunkedMessageIdSequenceMap.remove(messageIdImpl);
+            // cumulative ack chunk by the last messageId
+            if (chunkMsgIds == null || ackType == AckType.Cumulative) {
+                cmdList = Collections.singletonList(Commands.newAck(consumerId, ledgerId, entryId, null, ackType,
+                        validationError, properties, txnID.getLeastSigBits(), txnID.getMostSigBits(), requestId));
+            } else {
+                if (Commands.peerSupportsMultiMessageAcknowledgment(
+                        getClientCnx().getRemoteEndpointProtocolVersion())) {
+                    List<Triple<Long, Long, ConcurrentBitSetRecyclable>> entriesToAck =
+                            new ArrayList<>(chunkMsgIds.length);
+                    for (MessageIdImpl cMsgId : chunkMsgIds) {
+                        if (cMsgId != null && chunkMsgIds.length > 1) {
+                            entriesToAck.add(Triple.of(cMsgId.getLedgerId(), cMsgId.getEntryId(), null));
+                        }
+                    }
+                    cmdList = Collections.singletonList(
+                            newMultiTransactionMessageAck(consumerId, txnID, entriesToAck, requestId));
+                } else {
+                    cmdList = new ArrayList<>();
+                    for (MessageIdImpl cMsgId : chunkMsgIds) {
+                        cmdList.add(Commands.newAck(consumerId, cMsgId.ledgerId, cMsgId.entryId, null, ackType,
+                                validationError, properties,
+                                txnID.getLeastSigBits(), txnID.getMostSigBits(), requestId));
+                    }
+                }
+            }
         }
 
         if (ackType == AckType.Cumulative) {
@@ -2771,8 +2896,55 @@ public class ConsumerImpl<T> extends ConsumerBase<T> implements ConnectionHandle
                     .ConnectException("Failed to ack message [" + messageId + "] "
                     + "for transaction [" + txnID + "] due to consumer connect fail, consumer state: " + getState()));
         } else {
-            return cnx.newAckForReceipt(cmd, requestId);
+            List<CompletableFuture<Void>> completableFutures = new LinkedList<>();
+            cmdList.forEach(cmd -> completableFutures.add(cnx.newAckForReceipt(cmd, requestId)));
+            return FutureUtil.waitForAll(completableFutures);
         }
+    }
+
+    private ByteBuf newMultiTransactionMessageAck(long consumerId, TxnID txnID,
+                                                  List<Triple<Long, Long, ConcurrentBitSetRecyclable>> entries,
+                                                  long requestID) {
+        BaseCommand cmd = newMultiMessageAckCommon(entries);
+        cmd.getAck()
+                .setConsumerId(consumerId)
+                .setAckType(AckType.Individual)
+                .setTxnidLeastBits(txnID.getLeastSigBits())
+                .setTxnidMostBits(txnID.getMostSigBits())
+                .setRequestId(requestID);
+        return serializeWithSize(cmd);
+    }
+
+    private static final FastThreadLocal<BaseCommand> LOCAL_BASE_COMMAND = new FastThreadLocal<BaseCommand>() {
+        @Override
+        protected BaseCommand initialValue() throws Exception {
+            return new BaseCommand();
+        }
+    };
+
+    private static BaseCommand newMultiMessageAckCommon(List<Triple<Long, Long, ConcurrentBitSetRecyclable>> entries) {
+        BaseCommand cmd = LOCAL_BASE_COMMAND.get()
+                .clear()
+                .setType(BaseCommand.Type.ACK);
+        CommandAck ack = cmd.setAck();
+        int entriesCount = entries.size();
+        for (int i = 0; i < entriesCount; i++) {
+            long ledgerId = entries.get(i).getLeft();
+            long entryId = entries.get(i).getMiddle();
+            ConcurrentBitSetRecyclable bitSet = entries.get(i).getRight();
+            MessageIdData msgId = ack.addMessageId()
+                    .setLedgerId(ledgerId)
+                    .setEntryId(entryId);
+            if (bitSet != null) {
+                long[] ackSet = bitSet.toLongArray();
+                for (int j = 0; j < ackSet.length; j++) {
+                    msgId.addAckSet(ackSet[j]);
+                }
+                bitSet.recycle();
+            }
+        }
+
+        return cmd;
     }
 
     private CompletableFuture<Void> doTransactionAcknowledgeForResponse(List<MessageId> messageIds, AckType ackType,

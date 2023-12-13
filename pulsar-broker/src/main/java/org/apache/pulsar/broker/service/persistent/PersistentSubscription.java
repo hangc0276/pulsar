@@ -201,7 +201,12 @@ public class PersistentSubscription extends AbstractSubscription implements Subs
 
         if (this.cursor != null) {
             if (replicated) {
-                return this.cursor.putProperty(REPLICATED_SUBSCRIPTION_PROPERTY, 1L);
+                if (!config.isEnableReplicatedSubscriptions()) {
+                    log.warn("[{}][{}] Failed set replicated subscription status to {}, please enable the "
+                            + "configuration enableReplicatedSubscriptions", topicName, subName, replicated);
+                } else {
+                    return this.cursor.putProperty(REPLICATED_SUBSCRIPTION_PROPERTY, 1L);
+                }
             } else {
                 return this.cursor.removeProperty(REPLICATED_SUBSCRIPTION_PROPERTY);
             }
@@ -844,6 +849,12 @@ public class PersistentSubscription extends AbstractSubscription implements Subs
             public void readEntryComplete(Entry entry, Object ctx) {
                 future.complete(entry);
             }
+
+            @Override
+            public String toString() {
+                return String.format("Subscription [{}-{}] async replay entries", PersistentSubscription.this.topicName,
+                        PersistentSubscription.this.subName);
+            }
         }, null);
 
         return future;
@@ -1052,8 +1063,9 @@ public class PersistentSubscription extends AbstractSubscription implements Subs
 
     @Override
     public boolean expireMessages(int messageTTLInSeconds) {
-        if ((getNumberOfEntriesInBacklog(false) == 0) || (dispatcher != null && dispatcher.isConsumerConnected()
-                && getNumberOfEntriesInBacklog(false) < MINIMUM_BACKLOG_FOR_EXPIRY_CHECK
+        long backlog = getNumberOfEntriesInBacklog(false);
+        if (backlog == 0 || (dispatcher != null && dispatcher.isConsumerConnected()
+                && backlog < MINIMUM_BACKLOG_FOR_EXPIRY_CHECK
                 && !topic.isOldestMessageExpired(cursor, messageTTLInSeconds))) {
             // don't do anything for almost caught-up connected subscriptions
             return false;
@@ -1147,16 +1159,20 @@ public class PersistentSubscription extends AbstractSubscription implements Subs
             subStats.backlogSize = ((ManagedLedgerImpl) topic.getManagedLedger())
                     .getEstimatedBacklogSize((PositionImpl) cursor.getMarkDeletedPosition());
         }
-        if (getEarliestTimeInBacklog && subStats.msgBacklog > 0) {
-            ManagedLedgerImpl managedLedger = ((ManagedLedgerImpl) cursor.getManagedLedger());
-            PositionImpl markDeletedPosition = (PositionImpl) cursor.getMarkDeletedPosition();
-            long result = 0;
-            try {
-                result = managedLedger.getEarliestMessagePublishTimeOfPos(markDeletedPosition).get();
-            } catch (InterruptedException | ExecutionException e) {
-                result = -1;
+        if (getEarliestTimeInBacklog) {
+            if (subStats.msgBacklog > 0) {
+                ManagedLedgerImpl managedLedger = ((ManagedLedgerImpl) cursor.getManagedLedger());
+                PositionImpl markDeletedPosition = (PositionImpl) cursor.getMarkDeletedPosition();
+                long result = 0;
+                try {
+                    result = managedLedger.getEarliestMessagePublishTimeOfPos(markDeletedPosition).get();
+                } catch (InterruptedException | ExecutionException e) {
+                    result = -1;
+                }
+                subStats.earliestMsgPublishTimeInBacklog = result;
+            } else {
+                subStats.earliestMsgPublishTimeInBacklog = -1;
             }
-            subStats.earliestMsgPublishTimeInBacklog = result;
         }
         subStats.msgBacklogNoDelayed = subStats.msgBacklog - subStats.msgDelayed;
         subStats.msgRateExpired = expiryMonitor.getMessageExpiryRate();

@@ -18,8 +18,10 @@
  */
 package org.apache.pulsar.broker.admin.impl;
 
+import static org.apache.pulsar.common.naming.SystemTopicNames.isSystemTopic;
 import static org.apache.pulsar.common.naming.SystemTopicNames.isTransactionCoordinatorAssign;
 import static org.apache.pulsar.common.naming.SystemTopicNames.isTransactionInternalName;
+import static org.apache.pulsar.common.naming.TopicName.PARTITIONED_TOPIC_SUFFIX;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.github.zafarkhaja.semver.Version;
 import com.google.common.collect.Lists;
@@ -631,7 +633,9 @@ public class PersistentTopicsBase extends AdminResource {
                                     .thenCompose(unused -> internalRemovePartitionsTopicAsync(numPartitions, force));
                         })
                 // Only tries to delete the znode for partitioned topic when all its partitions are successfully deleted
-                ).thenCompose(__ -> namespaceResources()
+                ).thenCompose(ignore ->
+                        pulsar().getBrokerService().deleteSchema(topicName).exceptionally(ex -> null))
+                .thenCompose(__ -> namespaceResources()
                                 .getPartitionedTopicResources().deletePartitionedTopicAsync(topicName))
                 .thenAccept(__ -> {
                     log.info("[{}] Deleted partitioned topic {}", clientAppId(), topicName);
@@ -1007,6 +1011,21 @@ public class PersistentTopicsBase extends AdminResource {
                 .thenCompose(__ -> pulsar().getBrokerService().deleteTopic(topicName.toString(), force));
     }
 
+    /**
+     * There has a known bug will make Pulsar misidentifies "tp-partition-0-DLQ-partition-0" as "tp-partition-0-DLQ".
+     * You can see the details from PR https://github.com/apache/pulsar/pull/19841.
+     * This method is a quick fix and will be removed in master branch after #19841 and PIP 263 are done.
+     */
+    private boolean isUnexpectedTopicName(PartitionedTopicMetadata topicMetadata) {
+        if (!topicName.toString().contains(PARTITIONED_TOPIC_SUFFIX)){
+            return false;
+        }
+        if (topicMetadata.partitions <= 0){
+            return false;
+        }
+        return topicName.getPartition(0).toString().equals(topicName.toString());
+    }
+
     protected void internalGetSubscriptions(AsyncResponse asyncResponse, boolean authoritative) {
         CompletableFuture<Void> future;
         if (topicName.isGlobal()) {
@@ -1024,7 +1043,7 @@ public class PersistentTopicsBase extends AdminResource {
                     } else {
                         getPartitionedTopicMetadataAsync(topicName, authoritative, false)
                                 .thenAccept(partitionMetadata -> {
-                            if (partitionMetadata.partitions > 0) {
+                            if (partitionMetadata.partitions > 0 && !isUnexpectedTopicName(partitionMetadata)) {
                                 try {
                                     final Set<String> subscriptions =
                                             Collections.newSetFromMap(
@@ -1096,7 +1115,14 @@ public class PersistentTopicsBase extends AdminResource {
                     resumeAsyncResponseExceptionally(asyncResponse, ex);
                     return null;
                 })
-        );
+        ).exceptionally(ex -> {
+            // If the exception is not redirect exception we need to log it.
+            if (!isRedirectException(ex)) {
+                log.error("[{}] Failed to get subscriptions for {}", clientAppId(), topicName, ex);
+            }
+            resumeAsyncResponseExceptionally(asyncResponse, ex);
+            return null;
+        });
     }
 
     private void resumeAsyncResponse(AsyncResponse asyncResponse, Set<String> subscriptions,
@@ -1448,7 +1474,8 @@ public class PersistentTopicsBase extends AdminResource {
             future = CompletableFuture.completedFuture(null);
         }
 
-        future.thenCompose(__ -> validateTopicOwnershipAsync(topicName, authoritative)).thenAccept(__ -> {
+        future.thenCompose(__ -> validateTopicOperationAsync(topicName, TopicOperation.UNSUBSCRIBE, subName))
+                .thenCompose(__ -> validateTopicOwnershipAsync(topicName, authoritative)).thenAccept(__ -> {
             if (topicName.isPartitioned()) {
                 internalDeleteSubscriptionForNonPartitionedTopic(asyncResponse, subName, authoritative);
             } else {
@@ -1514,10 +1541,10 @@ public class PersistentTopicsBase extends AdminResource {
         });
     }
 
+    // Note: this method expects the caller to check authorization
     private void internalDeleteSubscriptionForNonPartitionedTopic(AsyncResponse asyncResponse,
                                                                   String subName, boolean authoritative) {
         validateTopicOwnershipAsync(topicName, authoritative)
-            .thenRun(() -> validateTopicOperation(topicName, TopicOperation.UNSUBSCRIBE, subName))
             .thenCompose(__ -> getTopicReferenceAsync(topicName))
             .thenCompose(topic -> {
                 Subscription sub = topic.getSubscription(subName);
@@ -2192,9 +2219,10 @@ public class PersistentTopicsBase extends AdminResource {
                 internalCreateSubscriptionForNonPartitionedTopic(asyncResponse,
                         subscriptionName, targetMessageId, authoritative, replicated, properties);
             } else {
-                boolean allowAutoTopicCreation = pulsar().getBrokerService().isAllowAutoTopicCreation(topicName);
-                getPartitionedTopicMetadataAsync(topicName,
-                        authoritative, allowAutoTopicCreation).thenAccept(partitionMetadata -> {
+                pulsar().getBrokerService().isAllowAutoTopicCreationAsync(topicName)
+                    .thenCompose(allowAutoTopicCreation ->
+                            getPartitionedTopicMetadataAsync(topicName, authoritative, allowAutoTopicCreation))
+                    .thenAccept(partitionMetadata -> {
                     final int numPartitions = partitionMetadata.partitions;
                     if (numPartitions > 0) {
                         final CompletableFuture<Void> future = new CompletableFuture<>();
@@ -2290,13 +2318,13 @@ public class PersistentTopicsBase extends AdminResource {
             MessageIdImpl targetMessageId, boolean authoritative, boolean replicated,
             Map<String, String> properties) {
 
-        boolean isAllowAutoTopicCreation = pulsar().getBrokerService().isAllowAutoTopicCreation(topicName);
-
-        validateTopicOwnershipAsync(topicName, authoritative)
-                .thenCompose(__ -> {
-                    validateTopicOperation(topicName, TopicOperation.SUBSCRIBE, subscriptionName);
-                    return pulsar().getBrokerService().getTopic(topicName.toString(), isAllowAutoTopicCreation);
-                }).thenApply(optTopic -> {
+        pulsar().getBrokerService().isAllowAutoTopicCreationAsync(topicName)
+            .thenCompose(isAllowAutoTopicCreation -> validateTopicOwnershipAsync(topicName, authoritative)
+                    .thenCompose(__ -> {
+                        validateTopicOperation(topicName, TopicOperation.SUBSCRIBE, subscriptionName);
+                        return pulsar().getBrokerService().getTopic(topicName.toString(), isAllowAutoTopicCreation);
+                    }))
+           .thenApply(optTopic -> {
             if (optTopic.isPresent()) {
                 return optTopic.get();
             } else {
@@ -2672,6 +2700,12 @@ public class PersistentTopicsBase extends AdminResource {
                             }
                         }
                     }
+
+                    @Override
+                    public String toString() {
+                        return String.format("Topic [{}] get entry batch size",
+                                PersistentTopicsBase.this.topicName);
+                    }
                 }, null);
             } catch (NullPointerException npe) {
                 batchSizeFuture.completeExceptionally(new RestException(Status.NOT_FOUND, "Message not found"));
@@ -2757,6 +2791,12 @@ public class PersistentTopicsBase extends AdminResource {
                                             entry.release();
                                         }
                                     }
+                                }
+
+                                @Override
+                                public String toString() {
+                                    return String.format("Topic [{}] internal get message by id",
+                                            PersistentTopicsBase.this.topicName);
                                 }
                             }, null);
                 }).exceptionally(ex -> {
@@ -2926,6 +2966,12 @@ public class PersistentTopicsBase extends AdminResource {
                             @Override
                             public void readEntryFailed(ManagedLedgerException exception, Object ctx) {
                                 future.completeExceptionally(exception);
+                            }
+
+                            @Override
+                            public String toString() {
+                                return String.format("Topic [{}] internal examine message async",
+                                        PersistentTopicsBase.this.topicName);
                             }
                         }, null);
                         return future;
@@ -3580,7 +3626,7 @@ public class PersistentTopicsBase extends AdminResource {
                             .thenCompose(metadata -> {
                                 if (metadata.partitions > 0) {
                                     return validateTopicOwnershipAsync(TopicName.get(topicName.toString()
-                                    + TopicName.PARTITIONED_TOPIC_SUFFIX + 0), authoritative);
+                                    + PARTITIONED_TOPIC_SUFFIX + 0), authoritative);
                                 } else {
                                     return validateTopicOwnershipAsync(topicName, authoritative);
                                 }
@@ -4228,8 +4274,13 @@ public class PersistentTopicsBase extends AdminResource {
         // validates global-namespace contains local/peer cluster: if peer/local cluster present then lookup can
         // serve/redirect request else fail partitioned-metadata-request so, client fails while creating
         // producer/consumer
+        // It is necessary for system topic operations because system topics are used to store metadata
+        // and other vital information. Even after namespace starting deletion,,
+        // we need to access the metadata of system topics to create readers and clean up topic data.
+        // If we don't do this, it can prevent namespace deletion due to inaccessible readers.
         authorizationFuture.thenCompose(__ ->
-                        checkLocalOrGetPeerReplicationCluster(pulsar, topicName.getNamespaceObject()))
+                        checkLocalOrGetPeerReplicationCluster(pulsar, topicName.getNamespaceObject(),
+                                SystemTopicNames.isSystemTopic(topicName)))
                 .thenCompose(res ->
                         pulsar.getBrokerService().fetchPartitionedTopicMetadataCheckAllowAutoCreationAsync(topicName))
                 .thenAccept(metadata -> {
@@ -4256,7 +4307,11 @@ public class PersistentTopicsBase extends AdminResource {
         // validates global-namespace contains local/peer cluster: if peer/local cluster present then lookup can
         // serve/redirect request else fail partitioned-metadata-request so, client fails while creating
         // producer/consumer
-        checkLocalOrGetPeerReplicationCluster(pulsar, topicName.getNamespaceObject())
+        // It is necessary for system topic operations because system topics are used to store metadata
+        // and other vital information. Even after namespace starting deletion,,
+        // we need to access the metadata of system topics to create readers and clean up topic data.
+        // If we don't do this, it can prevent namespace deletion due to inaccessible readers.
+        checkLocalOrGetPeerReplicationCluster(pulsar, topicName.getNamespaceObject(), isSystemTopic(topicName))
             .thenCompose(res -> pulsar.getBrokerService()
                 .fetchPartitionedTopicMetadataCheckAllowAutoCreationAsync(topicName))
             .thenAccept(metadata -> {
@@ -4507,7 +4562,7 @@ public class PersistentTopicsBase extends AdminResource {
     private CompletableFuture<Void> validatePartitionTopicUpdateAsync(String topicName, int numberOfPartition) {
         return internalGetListAsync().thenCompose(existingTopicList -> {
             TopicName partitionTopicName = TopicName.get(domain(), namespaceName, topicName);
-            String prefix = partitionTopicName.getPartitionedTopicName() + TopicName.PARTITIONED_TOPIC_SUFFIX;
+            String prefix = partitionTopicName.getPartitionedTopicName() + PARTITIONED_TOPIC_SUFFIX;
             return getPartitionedTopicMetadataAsync(partitionTopicName, false, false)
                     .thenAccept(metadata -> {
                         int oldPartition = metadata.partitions;
@@ -4515,8 +4570,8 @@ public class PersistentTopicsBase extends AdminResource {
                             if (existingTopicName.startsWith(prefix)) {
                                 try {
                                     long suffix = Long.parseLong(existingTopicName.substring(
-                                            existingTopicName.indexOf(TopicName.PARTITIONED_TOPIC_SUFFIX)
-                                                    + TopicName.PARTITIONED_TOPIC_SUFFIX.length()));
+                                            existingTopicName.indexOf(PARTITIONED_TOPIC_SUFFIX)
+                                                    + PARTITIONED_TOPIC_SUFFIX.length()));
                                     // Skip partition of partitioned topic by making sure
                                     // the numeric suffix greater than old partition number.
                                     if (suffix >= oldPartition && suffix <= (long) numberOfPartition) {
@@ -4557,12 +4612,12 @@ public class PersistentTopicsBase extends AdminResource {
      */
     private CompletableFuture<Void> validateNonPartitionTopicNameAsync(String topicName) {
         CompletableFuture<Void> ret = CompletableFuture.completedFuture(null);
-        if (topicName.contains(TopicName.PARTITIONED_TOPIC_SUFFIX)) {
+        if (topicName.contains(PARTITIONED_TOPIC_SUFFIX)) {
             try {
                 // First check if what's after suffix "-partition-" is number or not, if not number then can create.
-                int partitionIndex = topicName.indexOf(TopicName.PARTITIONED_TOPIC_SUFFIX);
+                int partitionIndex = topicName.indexOf(PARTITIONED_TOPIC_SUFFIX);
                 long suffix = Long.parseLong(topicName.substring(partitionIndex
-                        + TopicName.PARTITIONED_TOPIC_SUFFIX.length()));
+                        + PARTITIONED_TOPIC_SUFFIX.length()));
                 TopicName partitionTopicName = TopicName.get(domain(),
                         namespaceName, topicName.substring(0, partitionIndex));
                 ret = getPartitionedTopicMetadataAsync(partitionTopicName, false, false)

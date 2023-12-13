@@ -468,7 +468,7 @@ public class KubernetesRuntime implements Runtime {
                 .supplier(() -> {
                     final V1Service response;
                     try {
-                        response = coreClient.createNamespacedService(jobNamespace, service, null, null, null);
+                        response = coreClient.createNamespacedService(jobNamespace, service, null, null, null, null);
                     } catch (ApiException e) {
                         // already exists
                         if (e.getCode() == HTTP_CONFLICT) {
@@ -557,7 +557,8 @@ public class KubernetesRuntime implements Runtime {
                 .supplier(() -> {
                     final V1StatefulSet response;
                     try {
-                        response = appsClient.createNamespacedStatefulSet(jobNamespace, statefulSet, null, null, null);
+                        response = appsClient.createNamespacedStatefulSet(jobNamespace, statefulSet,
+                                null, null, null, null);
                     } catch (ApiException e) {
                         // already exists
                         if (e.getCode() == HTTP_CONFLICT) {
@@ -654,7 +655,7 @@ public class KubernetesRuntime implements Runtime {
                     V1StatefulSet response;
                     try {
                         response = appsClient.readNamespacedStatefulSet(statefulSetName, jobNamespace,
-                                null, null, null);
+                                null);
                     } catch (ApiException e) {
                         // statefulset is gone
                         if (e.getCode() == HTTP_NOT_FOUND) {
@@ -680,10 +681,11 @@ public class KubernetesRuntime implements Runtime {
                 .numRetries(KubernetesRuntimeFactory.numRetries * 2)
                 .sleepBetweenInvocationsMs(KubernetesRuntimeFactory.sleepBetweenRetriesMs * 2)
                 .supplier(() -> {
+                    Map<String, String> validLabels = getLabels(instanceConfig.getFunctionDetails());
                     String labels = String.format("tenant=%s,namespace=%s,name=%s",
-                            instanceConfig.getFunctionDetails().getTenant(),
-                            instanceConfig.getFunctionDetails().getNamespace(),
-                            instanceConfig.getFunctionDetails().getName());
+                            validLabels.get("tenant"),
+                            validLabels.get("namespace"),
+                            validLabels.get("name"));
 
                     V1PodList response;
                     try {
@@ -802,7 +804,7 @@ public class KubernetesRuntime implements Runtime {
                     V1Service response;
                     try {
                         response = coreClient.readNamespacedService(serviceName, jobNamespace,
-                                null, null, null);
+                                null);
 
                     } catch (ApiException e) {
                         // service is gone
@@ -865,80 +867,66 @@ public class KubernetesRuntime implements Runtime {
     }
 
     private List<String> getDownloadCommand(String tenant, String namespace, String name, String userCodeFilePath) {
+        List<String> result = new ArrayList<>();
+        result.add(pulsarRootDir + configAdminCLI);
 
         // add auth plugin and parameters if necessary
         if (authenticationEnabled && authConfig != null) {
-            if (isNotBlank(authConfig.getClientAuthenticationPlugin())
-                    && isNotBlank(authConfig.getClientAuthenticationParameters())
-                    && instanceConfig.getFunctionAuthenticationSpec() != null) {
-                return Arrays.asList(
-                        pulsarRootDir + configAdminCLI,
-                        "--auth-plugin",
-                        authConfig.getClientAuthenticationPlugin(),
-                        "--auth-params",
-                        authConfig.getClientAuthenticationParameters(),
-                        "--admin-url",
-                        pulsarAdminUrl,
-                        "functions",
-                        "download",
-                        "--tenant",
-                        tenant,
-                        "--namespace",
-                        namespace,
-                        "--name",
-                        name,
-                        "--destination-file",
-                        userCodeFilePath);
-            }
+            result.addAll(getAuthenticationParams(authConfig));
         }
-
-        return Arrays.asList(
-                pulsarRootDir + configAdminCLI,
-                "--admin-url",
-                pulsarAdminUrl,
-                "functions",
-                "download",
-                "--tenant",
-                tenant,
-                "--namespace",
-                namespace,
-                "--name",
-                name,
-                "--destination-file",
-                userCodeFilePath);
+        result.add("--admin-url");
+        result.add(pulsarAdminUrl);
+        result.add("functions");
+        result.add("download");
+        result.add("--tenant");
+        result.add(tenant);
+        result.add("--namespace");
+        result.add(namespace);
+        result.add("--name");
+        result.add(name);
+        result.add("--destination-file");
+        result.add(userCodeFilePath);
+        return result;
     }
 
     private List<String> getPackageDownloadCommand(String packageName, String userCodeFilePath) {
+        List<String> result = new ArrayList<>();
+        result.add(pulsarRootDir + configAdminCLI);
         // add auth plugin and parameters if necessary
         if (authenticationEnabled && authConfig != null) {
-            if (isNotBlank(authConfig.getClientAuthenticationPlugin())
+            result.addAll(getAuthenticationParams(authConfig));
+        }
+        result.add("--admin-url");
+        result.add(pulsarAdminUrl);
+        result.add("packages");
+        result.add("download");
+        result.add(packageName);
+        result.add("--path");
+        result.add(userCodeFilePath);
+        return result;
+    }
+
+    private List<String> getAuthenticationParams(AuthenticationConfig authConfig) {
+        List<String> result = new ArrayList<>();
+        if (isNotBlank(authConfig.getClientAuthenticationPlugin())
                 && isNotBlank(authConfig.getClientAuthenticationParameters())
                 && instanceConfig.getFunctionAuthenticationSpec() != null) {
-                return Arrays.asList(
-                    pulsarRootDir + configAdminCLI,
-                    "--auth-plugin",
-                    authConfig.getClientAuthenticationPlugin(),
-                    "--auth-params",
-                    authConfig.getClientAuthenticationParameters(),
-                    "--admin-url",
-                    pulsarAdminUrl,
-                    "packages",
-                    "download",
-                    packageName,
-                    "--path",
-                    userCodeFilePath);
-            }
+            result.add("--auth-plugin");
+            result.add(authConfig.getClientAuthenticationPlugin());
+            result.add("--auth-params");
+            result.add(authConfig.getClientAuthenticationParameters());
         }
-
-        return Arrays.asList(
-            pulsarRootDir + configAdminCLI,
-            "--admin-url",
-            pulsarAdminUrl,
-            "packages",
-            "download",
-            packageName,
-            "--path",
-            userCodeFilePath);
+        if (authConfig.isTlsAllowInsecureConnection()) {
+            result.add("--tls-allow-insecure");
+        }
+        if (authConfig.isTlsHostnameVerificationEnable()) {
+            result.add("--tls-enable-hostname-verification");
+        }
+        if (isNotBlank(authConfig.getTlsTrustCertsFilePath())) {
+            result.add("--tls-trust-cert-path");
+            result.add(authConfig.getTlsTrustCertsFilePath());
+        }
+        return result;
     }
 
     private static String setShardIdEnvironmentVariableCommand() {

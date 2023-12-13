@@ -41,6 +41,7 @@ import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.lang.reflect.Array;
 import java.lang.reflect.Field;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -66,6 +67,7 @@ import lombok.Cleanup;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.bookkeeper.mledger.ManagedLedgerConfig;
 import org.apache.bookkeeper.mledger.ManagedLedgerException;
+import org.apache.bookkeeper.mledger.impl.ManagedCursorImpl;
 import org.apache.bookkeeper.mledger.impl.ManagedLedgerFactoryImpl;
 import org.apache.bookkeeper.mledger.impl.ManagedLedgerImpl;
 import org.apache.http.HttpResponse;
@@ -75,6 +77,7 @@ import org.apache.http.impl.client.HttpClientBuilder;
 import org.apache.pulsar.broker.PulsarService;
 import org.apache.pulsar.broker.namespace.NamespaceService;
 import org.apache.pulsar.broker.service.BrokerServiceException.PersistenceException;
+import org.apache.pulsar.broker.service.persistent.PersistentSubscription;
 import org.apache.pulsar.broker.service.persistent.PersistentTopic;
 import org.apache.pulsar.broker.stats.prometheus.PrometheusRawMetricsProvider;
 import org.apache.pulsar.client.admin.BrokerStats;
@@ -105,7 +108,9 @@ import org.apache.pulsar.common.policies.data.SubscriptionStats;
 import org.apache.pulsar.common.policies.data.TopicStats;
 import org.apache.pulsar.common.protocol.Commands;
 import org.apache.pulsar.common.util.netty.EventLoopUtil;
+import org.apache.pulsar.compaction.Compactor;
 import org.awaitility.Awaitility;
+import org.mockito.Mockito;
 import org.testng.Assert;
 import org.testng.annotations.AfterClass;
 import org.testng.annotations.BeforeClass;
@@ -1146,7 +1151,7 @@ public class BrokerServiceTest extends BrokerTestBase {
 
         // try to create topic which should fail as bundle is disable
         CompletableFuture<Optional<Topic>> futureResult = pulsar.getBrokerService()
-                .loadOrCreatePersistentTopic(topicName, true, null);
+                .loadOrCreatePersistentTopic(topicName, true, null, null);
 
         try {
             futureResult.get();
@@ -1157,6 +1162,131 @@ public class BrokerServiceTest extends BrokerTestBase {
             }
 
         }
+    }
+
+    @Test
+    public void testConcurrentLoadTopicExceedLimitShouldNotBeAutoCreated() throws Exception {
+        boolean needDeleteTopic = false;
+        final String namespace = "prop/concurrentLoad";
+        try {
+            // set up broker disable auto create and set concurrent load to 1 qps.
+            cleanup();
+            conf.setMaxConcurrentTopicLoadRequest(1);
+            conf.setAllowAutoTopicCreation(false);
+            setup();
+
+            try {
+                admin.namespaces().createNamespace(namespace);
+            } catch (PulsarAdminException.ConflictException e) {
+                // Ok.. (if test fails intermittently and namespace is already created)
+            }
+
+            // create 3 topic
+            String topicName = "persistent://" + namespace + "/my-topic";
+
+            for (int i = 0; i < 3; i++) {
+                admin.topics().createNonPartitionedTopic(topicName + "_" + i);
+            }
+
+            needDeleteTopic = true;
+
+            // try to load 10 topic
+            ArrayList<CompletableFuture<Optional<Topic>>> loadFutures = new ArrayList<>();
+            for (int i = 0; i < 10; i++) {
+                // try to create topic which should fail as bundle is disable
+                CompletableFuture<Optional<Topic>> futureResult = pulsar.getBrokerService()
+                        .loadOrCreatePersistentTopic(topicName + "_" + i, false, null, null);
+                loadFutures.add(futureResult);
+            }
+
+            CompletableFuture<?>[] o = (CompletableFuture<?>[]) Array.newInstance(CompletableFuture.class, 10);
+            CompletableFuture<?>[] completableFutures = loadFutures.toArray(o);
+            CompletableFuture.allOf(completableFutures).get();
+
+            // check topic load CompletableFuture. only first three topic should be success.
+            for (int i = 0; i < 10; i++) {
+                CompletableFuture<Optional<Topic>> load = loadFutures.get(i);
+                if (i < 3) {
+                    Assert.assertTrue(load.isDone());
+                    Assert.assertFalse(load.isCompletedExceptionally());
+                } else {
+                    // check topic should not be created if disable autoCreateTopic.
+                    Assert.assertTrue(load.isDone());
+                    Assert.assertTrue(load.get().isEmpty());
+                }
+            }
+        } finally {
+            if (needDeleteTopic) {
+                String topicName = "persistent://" + namespace + "/my-topic";
+
+                for (int i = 0; i < 3; i++) {
+                    admin.topics().delete(topicName + "_" + i);
+                }
+            }
+        }
+    }
+
+    @Test
+    public void testCheckInactiveSubscriptionsShouldNotDeleteCompactionCursor() throws Exception {
+        String namespace = "prop/test";
+
+        // set up broker set compaction threshold.
+        cleanup();
+        conf.setBrokerServiceCompactionThresholdInBytes(8);
+        setup();
+
+        try {
+            admin.namespaces().createNamespace(namespace);
+        } catch (PulsarAdminException.ConflictException e) {
+            // Ok.. (if test fails intermittently and namespace is already created)
+        }
+
+        // set enable subscription expiration.
+        admin.namespaces().setSubscriptionExpirationTime(namespace, 1);
+
+        String compactionInactiveTestTopic = "persistent://prop/test/testCompactionCursorShouldNotDelete";
+
+        admin.topics().createNonPartitionedTopic(compactionInactiveTestTopic);
+
+        CompletableFuture<Optional<Topic>> topicCf =
+                pulsar.getBrokerService().getTopic(compactionInactiveTestTopic, true);
+
+        Optional<Topic> topicOptional = topicCf.get();
+        assertTrue(topicOptional.isPresent());
+
+        PersistentTopic topic = (PersistentTopic) topicOptional.get();
+
+        PersistentSubscription sub = (PersistentSubscription) topic.getSubscription(Compactor.COMPACTION_SUBSCRIPTION);
+        assertNotNull(sub);
+
+        topic.checkCompaction();
+
+        Field currentCompaction = PersistentTopic.class.getDeclaredField("currentCompaction");
+        currentCompaction.setAccessible(true);
+        CompletableFuture<Long> compactionFuture = (CompletableFuture<Long>)currentCompaction.get(topic);
+
+        compactionFuture.get();
+
+        ManagedCursorImpl cursor = (ManagedCursorImpl) sub.getCursor();
+
+        // make cursor last active time to very small to check if it will be deleted
+        Field cursorLastActiveField = ManagedCursorImpl.class.getDeclaredField("lastActive");
+        cursorLastActiveField.setAccessible(true);
+        cursorLastActiveField.set(cursor, 0);
+
+        // replace origin object. so we can check if subscription is deleted.
+        PersistentSubscription spySubscription = Mockito.spy(sub);
+        topic.getSubscriptions().put(Compactor.COMPACTION_SUBSCRIPTION, spySubscription);
+
+        // trigger inactive check.
+        topic.checkInactiveSubscriptions();
+
+        // Compaction subscription should not call delete method.
+        Mockito.verify(spySubscription, Mockito.never()).delete();
+
+        // check if the subscription exist.
+        assertNotNull(topic.getSubscription(Compactor.COMPACTION_SUBSCRIPTION));
+
     }
 
     /**

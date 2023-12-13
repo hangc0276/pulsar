@@ -167,7 +167,7 @@ public class TopicPoliciesTest extends MockedPulsarServiceBaseTest {
         assertFalse(pulsar.getBrokerService().getTopics().containsKey(topic));
         //make sure namespace policy reader is fully started.
         Awaitility.await().untilAsserted(()-> {
-            assertTrue(policyService.getPoliciesCacheInit(topicName.getNamespaceObject()));
+            assertTrue(policyService.getPoliciesCacheInit(topicName.getNamespaceObject()).isDone());
         });
 
         //load the topic.
@@ -2986,6 +2986,7 @@ public class TopicPoliciesTest extends MockedPulsarServiceBaseTest {
             });
         }
     }
+
     @Test
     public void testGlobalTopicPolicies() throws Exception {
         final String topic = testTopic + UUID.randomUUID();

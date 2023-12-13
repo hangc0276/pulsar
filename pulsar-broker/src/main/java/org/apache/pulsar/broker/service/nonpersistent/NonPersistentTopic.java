@@ -28,7 +28,7 @@ import com.google.common.collect.Maps;
 import io.netty.buffer.ByteBuf;
 import io.netty.util.concurrent.FastThreadLocal;
 import java.util.ArrayList;
-import java.util.Collections;
+import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -158,17 +158,19 @@ public class NonPersistentTopic extends AbstractTopic implements Topic, TopicPol
         return brokerService.pulsar().getPulsarResources().getNamespaceResources()
                 .getPoliciesAsync(TopicName.get(topic).getNamespaceObject())
                 .thenAccept(optPolicies -> {
+                    final Policies policies;
                     if (!optPolicies.isPresent()) {
                         log.warn("[{}] Policies not present and isEncryptionRequired will be set to false", topic);
                         isEncryptionRequired = false;
+                        policies = new Policies();
                     } else {
-                        Policies policies = optPolicies.get();
+                        policies = optPolicies.get();
                         updateTopicPolicyByNamespacePolicy(policies);
                         isEncryptionRequired = policies.encryption_required;
                         isAllowAutoUpdateSchema = policies.is_allow_auto_update_schema;
                     }
                     updatePublishDispatcher();
-                    updateResourceGroupLimiter(optPolicies);
+                    updateResourceGroupLimiter(policies);
                 });
     }
 
@@ -188,7 +190,8 @@ public class NonPersistentTopic extends AbstractTopic implements Topic, TopicPol
             // entry internally retains data so, duplicateBuffer should be release here
             duplicateBuffer.release();
             if (subscription.getDispatcher() != null) {
-                subscription.getDispatcher().sendMessages(Collections.singletonList(entry));
+                // Dispatcher needs to call the set method to support entry filter feature.
+                subscription.getDispatcher().sendMessages(Arrays.asList(entry));
             } else {
                 // it happens when subscription is created but dispatcher is not created as consumer is not added
                 // yet
@@ -604,6 +607,7 @@ public class NonPersistentTopic extends AbstractTopic implements Topic, TopicPol
 
         replicators.get(remoteCluster).disconnect().thenRun(() -> {
             log.info("[{}] Successfully removed replicator {}", name, remoteCluster);
+            replicators.remove(remoteCluster);
 
         }).exceptionally(e -> {
             log.error("[{}] Failed to close replication producer {} {}", topic, name, e.getMessage(), e);

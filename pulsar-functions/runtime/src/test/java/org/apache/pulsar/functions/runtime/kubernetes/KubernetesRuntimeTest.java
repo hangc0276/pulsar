@@ -32,9 +32,17 @@ import io.kubernetes.client.openapi.models.V1ResourceRequirements;
 import io.kubernetes.client.openapi.models.V1Service;
 import io.kubernetes.client.openapi.models.V1StatefulSet;
 import io.kubernetes.client.openapi.models.V1Toleration;
+import java.lang.reflect.Type;
+import java.math.BigDecimal;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.stream.Collectors;
 import org.apache.commons.lang.StringUtils;
-import org.apache.commons.lang3.SystemUtils;
 import org.apache.commons.lang3.JavaVersion;
+import org.apache.commons.lang3.SystemUtils;
 import org.apache.pulsar.common.util.ObjectMapperFactory;
 import org.apache.pulsar.functions.instance.AuthenticationConfig;
 import org.apache.pulsar.functions.instance.InstanceConfig;
@@ -56,16 +64,6 @@ import org.testng.Assert;
 import org.testng.annotations.AfterMethod;
 import org.testng.annotations.BeforeClass;
 import org.testng.annotations.Test;
-
-import java.lang.reflect.Type;
-import java.math.BigDecimal;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Optional;
-import java.util.stream.Collectors;
-
 import static org.apache.pulsar.functions.runtime.RuntimeUtils.FUNCTIONS_INSTANCE_CLASSPATH;
 import static org.apache.pulsar.functions.utils.FunctionCommon.roundDecimal;
 import static org.mockito.Mockito.doNothing;
@@ -888,7 +886,7 @@ public class KubernetesRuntimeTest {
         assertEquals(goInstanceConfig.get("disk"), 10000);
         assertEquals(goInstanceConfig.get("instanceID"), 0);
         assertEquals(goInstanceConfig.get("cleanupSubscription"), false);
-        assertEquals(goInstanceConfig.get("port"), 0);
+        assertEquals(goInstanceConfig.get("port"), 4332);
         assertEquals(goInstanceConfig.get("subscriptionType"), 0);
         assertEquals(goInstanceConfig.get("timeoutMs"), 0);
         assertEquals(goInstanceConfig.get("subscriptionName"), "");
@@ -1147,6 +1145,25 @@ public class KubernetesRuntimeTest {
         KubernetesRuntime container = factory.createContainer(config, userJarFile, userJarFile, 30l);
         V1StatefulSet spec = container.createStatefulSet();
         String expectedDownloadCommand = "pulsar-admin --admin-url http://localhost:8080 packages download "
+                + "function://public/default/test@v1 --path " + factory.getDownloadDirectory() + "/" + userJarFile;
+        String containerCommand = spec.getSpec().getTemplate().getSpec().getContainers().get(0).getCommand().get(2);
+        assertTrue(containerCommand.contains(expectedDownloadCommand));
+    }
+    @Test
+    public void testCustomKubernetesDownloadWithTLSConfig() throws Exception {
+        String downloadDirectory = "download/pulsar_functions";
+        InstanceConfig config = createJavaInstanceConfig(FunctionDetails.Runtime.JAVA, false);
+        config.setFunctionDetails(createFunctionDetails(FunctionDetails.Runtime.JAVA, false, (fb) -> {
+            return fb.setPackageUrl("function://public/default/test@v1");
+        }));
+
+        factory = createKubernetesRuntimeFactory(null, 10, 1.0, 1.0, Optional.empty(), downloadDirectory);
+        factory.setAuthenticationEnabled(true);
+        factory.setAuthConfig(AuthenticationConfig.builder().tlsHostnameVerificationEnable(true).build());
+
+        KubernetesRuntime container = factory.createContainer(config, userJarFile, userJarFile, 30l);
+        V1StatefulSet spec = container.createStatefulSet();
+        String expectedDownloadCommand = "pulsar-admin --tls-enable-hostname-verification --admin-url http://localhost:8080 packages download "
                 + "function://public/default/test@v1 --path " + factory.getDownloadDirectory() + "/" + userJarFile;
         String containerCommand = spec.getSpec().getTemplate().getSpec().getContainers().get(0).getCommand().get(2);
         assertTrue(containerCommand.contains(expectedDownloadCommand));

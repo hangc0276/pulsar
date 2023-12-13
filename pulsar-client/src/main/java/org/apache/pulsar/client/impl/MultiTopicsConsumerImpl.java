@@ -32,6 +32,7 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
@@ -88,7 +89,7 @@ public class MultiTopicsConsumerImpl<T> extends ConsumerBase<T> {
     // sum of topicPartitions, simple topic has 1, partitioned topic equals to partition number.
     AtomicInteger allTopicPartitionsNumber;
 
-    private boolean paused = false;
+    private volatile boolean paused = false;
     private final Object pauseMutex = new Object();
     // timeout related to auto check and subscribe partition increasement
     private volatile Timeout partitionsAutoUpdateTimeout = null;
@@ -539,8 +540,16 @@ public class MultiTopicsConsumerImpl<T> extends ConsumerBase<T> {
                 topicToMessageIdMap.putIfAbsent(topicMessageId.getTopicPartitionName(), new ArrayList<>());
                 topicToMessageIdMap.get(topicMessageId.getTopicPartitionName()).add(topicMessageId.getInnerMessageId());
             }
-            topicToMessageIdMap.forEach((topicPartitionName, messageIds) -> {
-                ConsumerImpl<T> consumer = consumers.get(topicPartitionName);
+            final Map<ConsumerImpl<T>, List<MessageId>> consumerToMessageIds = new IdentityHashMap<>();
+            for (Map.Entry<String, List<MessageId>> entry : topicToMessageIdMap.entrySet()) {
+                ConsumerImpl<T> consumer = consumers.get(entry.getKey());
+                if (consumer == null) {
+                    return FutureUtil.failedFuture(new PulsarClientException.NotConnectedException());
+                }
+                // Trigger the acknowledgment later to avoid sending partial acknowledgments
+                consumerToMessageIds.put(consumer, entry.getValue());
+            }
+            consumerToMessageIds.forEach((consumer, messageIds) -> {
                 resultFutures.add(consumer.doAcknowledgeWithTxn(messageIds, ackType, properties, txn)
                         .thenAccept((res) -> messageIdList.forEach(unAckedMessageTracker::remove)));
             });
@@ -1078,29 +1087,28 @@ public class MultiTopicsConsumerImpl<T> extends ConsumerBase<T> {
 
             CompletableFuture<Consumer<T>> subFuture = new CompletableFuture<>();
 
-            consumers.compute(topicName, (key, existingValue) -> {
-                if (existingValue != null) {
-                    String errorMessage = String.format("[%s] Failed to subscribe for topic [%s] in topics consumer. "
-                            + "Topic is already being subscribed for in other thread.", topic, topicName);
-                    log.warn(errorMessage);
-                    subscribeResult.completeExceptionally(new PulsarClientException(errorMessage));
-                    return existingValue;
-                } else {
-                    internalConfig.setStartPaused(paused);
-                    ConsumerImpl<T> newConsumer = createInternalConsumer(internalConfig, topicName,
-                            -1, subFuture, createIfDoesNotExist, schema);
-
-                    synchronized (pauseMutex) {
+            synchronized (pauseMutex) {
+                consumers.compute(topicName, (key, existingValue) -> {
+                    if (existingValue != null) {
+                        String errorMessage =
+                                String.format("[%s] Failed to subscribe for topic [%s] in topics consumer. "
+                                + "Topic is already being subscribed for in other thread.", topic, topicName);
+                        log.warn(errorMessage);
+                        subscribeResult.completeExceptionally(new PulsarClientException(errorMessage));
+                        return existingValue;
+                    } else {
+                        internalConfig.setStartPaused(paused);
+                        ConsumerImpl<T> newConsumer = createInternalConsumer(internalConfig, topicName,
+                                -1, subFuture, createIfDoesNotExist, schema);
                         if (paused) {
                             newConsumer.pause();
                         } else {
                             newConsumer.resume();
                         }
+                        return newConsumer;
                     }
-                    return newConsumer;
-                }
-            });
-
+                });
+            }
             futureList = Collections.singletonList(subFuture);
         }
 
@@ -1427,7 +1435,7 @@ public class MultiTopicsConsumerImpl<T> extends ConsumerBase<T> {
                         }
                         if (log.isDebugEnabled()) {
                             log.debug("[{}] create consumer {} for partitionName: {}",
-                                topicName, newConsumer.getTopic(), partitionName);
+                                    topicName, newConsumer.getTopic(), partitionName);
                         }
                         return subFuture;
                     })
