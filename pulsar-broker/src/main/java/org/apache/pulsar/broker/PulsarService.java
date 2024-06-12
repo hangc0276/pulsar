@@ -245,7 +245,6 @@ public class PulsarService implements AutoCloseable, ShutdownService {
     private TransactionBufferProvider transactionBufferProvider;
     private TransactionBufferClient transactionBufferClient;
     private HashedWheelTimer transactionTimer;
-
     private BrokerInterceptor brokerInterceptor;
     private AdditionalServlets brokerAdditionalServlets;
 
@@ -396,6 +395,8 @@ public class PulsarService implements AutoCloseable, ShutdownService {
             Thread.currentThread().interrupt();
         }
     }
+
+    // triger ci
 
     /**
      * Close the current pulsar service. All resources are released.
